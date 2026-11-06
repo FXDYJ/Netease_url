@@ -1,0 +1,108 @@
+name: Build Netease URL for NAS
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if the upstream commit has not changed
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 20 * * *'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-netease-url
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/Suxiaoqinx/Netease_url.git
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check the upstream revision
+        id: upstream
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_REBUILD: ${{ inputs.force || false }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/netease-url"
+          revision=$(git ls-remote --exit-code "$UPSTREAM" refs/heads/main | cut -f1)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if manifest=$(docker buildx imagetools inspect --raw "$image:latest"); then
+            published_revision=$(jq -r '.annotations["org.opencontainers.image.revision"] // ""' <<< "$manifest")
+            if [[ "$published_revision" == "$revision" && "$FORCE_REBUILD" != "true" ]]; then
+              echo "Upstream revision $revision is already published."
+              exit 0
+            fi
+          fi
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare a clean build context
+        if: steps.upstream.outputs.revision != ''
+        shell: bash
+        env:
+          REVISION: ${{ steps.upstream.outputs.revision }}
+        run: |
+          git init --quiet upstream-git
+          git -C upstream-git fetch --depth 1 "$UPSTREAM" "$REVISION"
+          test "$(git -C upstream-git rev-parse FETCH_HEAD)" = "$REVISION"
+          mkdir image-context
+          git -C upstream-git -c core.autocrlf=false archive FETCH_HEAD | tar -xf - -C image-context
+          rm -f image-context/cookie.txt image-context/.env
+
+      - name: Enable ARM64 emulation
+        if: steps.upstream.outputs.revision != ''
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        if: steps.upstream.outputs.revision != ''
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push the revision tag
+        if: steps.upstream.outputs.revision != ''
+        shell: bash
+        env:
+          IMAGE: ${{ steps.upstream.outputs.image }}
+          REVISION: ${{ steps.upstream.outputs.revision }}
+        run: |
+          docker buildx build image-context \
+            --platform linux/amd64,linux/arm64 \
+            --annotation "index:org.opencontainers.image.revision=$REVISION" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --tag "$IMAGE:sha-$REVISION" \
+            --push
+
+      - name: Smoke-test both architectures and promote latest
+        if: steps.upstream.outputs.revision != ''
+        shell: bash
+        env:
+          IMAGE: ${{ steps.upstream.outputs.image }}
+          REVISION: ${{ steps.upstream.outputs.revision }}
+        run: |
+          revision_image="$IMAGE:sha-$REVISION"
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --pull always --platform "$platform" --entrypoint sh "$revision_image" -ec '
+              test ! -e /app/cookie.txt
+              test ! -e /app/.env
+              ffmpeg -version >/dev/null
+              python -c "from main import app; assert app.test_client().get(\"/health\").status_code == 200"
+            '
+          done
+
+          docker buildx imagetools create --tag "$IMAGE:latest" "$revision_image"
+          echo "Published \`$IMAGE:latest\` and \`$revision_image\`." >> "$GITHUB_STEP_SUMMARY"
