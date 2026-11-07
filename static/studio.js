@@ -3,6 +3,10 @@
 const $ = (id) => document.getElementById(id);
 const audio = $("audio");
 const libraryKey = "echo-room-v1";
+const lanAccess = isLanHost(location.hostname);
+const downloadFormats = {
+  auto: "自动选择", direct: "源站直连下载", file: "通过 NAS 下载", json: "仅保存到 NAS",
+};
 const qualities = {
   standard: "标准音质", exhigh: "极高音质", lossless: "无损音质", hires: "Hi-Res",
   jyeffect: "高清环绕声", sky: "沉浸环绕声", jymaster: "超清母带", dolby: "杜比全景声",
@@ -12,9 +16,10 @@ const screens = {
   song: ["单曲解析", "解析单曲", "查看音源、实际音质和双语歌词。", "输入歌曲 ID 或网易云音乐链接", "解析"],
   playlist: ["歌单解析", "打开歌单", "查看曲目、逐首试听，或一次加入播放队列。", "输入歌单 ID 或链接", "解析"],
   album: ["专辑解析", "打开专辑", "按曲目顺序浏览专辑，保存想听的歌。", "输入专辑 ID 或链接", "解析"],
-  download: ["音乐下载", "下载音乐", "按所选音质保存文件。服务端会尝试写入封面和标签。", "输入歌曲 ID 或网易云音乐链接", "下载"],
+  download: ["音乐下载", "下载音乐", "选择音质和保存方式，再输入歌曲 ID 或链接。", "输入歌曲 ID 或网易云音乐链接", "下载"],
   favorites: ["收藏", "我的收藏", "收藏保存在当前浏览器。"],
   history: ["最近播放", "最近播放", "在当前浏览器里接着听。"],
+  settings: ["设置", "偏好设置", "修改后立即生效。局域网地址与外网域名的偏好分别保存。"],
 };
 const quickTracks = [
   { id: "25706282", name: "夜空中最亮的星", artists: "逃跑计划", album: "世界", pic: "https://p2.music.126.net/625-tE8OzdM-rWO37PgqlQ==/109951168111472442.jpg" },
@@ -31,6 +36,16 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
 ));
 const icon = (id) => '<svg aria-hidden="true"><use href="/static/studio-icons.svg#' + id + '"></use></svg>';
+
+function isLanHost(value) {
+  const host = value.toLowerCase().replace(/^\[|\]$|\.$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "::1" ||
+      /^(?:f[cd][0-9a-f]{2}|fe[89ab][0-9a-f]):/.test(host)) return true;
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+  const [first, second] = host.split(".").map(Number);
+  return first === 10 || first === 127 || (first === 192 && second === 168) ||
+    (first === 169 && second === 254) || (first === 172 && second >= 16 && second <= 31);
+}
 
 function restore() {
   try { return JSON.parse(localStorage.getItem(libraryKey)) || {}; }
@@ -65,6 +80,8 @@ const state = {
   quality: Object.hasOwn(qualities, saved.quality) ? saved.quality : "standard",
   order: orders.some(([id]) => id === saved.order) ? saved.order : "sequence",
   translated: saved.translated !== false,
+  downloadFormat: Object.hasOwn(downloadFormats, saved.downloadFormat) ? saved.downloadFormat : "auto",
+  playbackRoute: lanAccess && saved.playbackRoute === "nas" ? "nas" : "direct",
   lookup: null,
   playRequest: null,
   current: null,
@@ -74,12 +91,14 @@ const state = {
   lyricIndex: -1,
   downloads: new Set(),
   serviceCheck: 0,
+  serviceHealth: null,
+  serviceInfo: null,
 };
 
 function persist() {
   try {
-    const { favorites, history, queue, quality, order, translated } = state;
-    localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, queue, quality, order, translated, volume: audio.volume }));
+    const { favorites, history, queue, quality, order, translated, playbackRoute, downloadFormat } = state;
+    localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, queue, quality, order, translated, playbackRoute, downloadFormat, volume: audio.volume }));
   } catch {
     // Private browsing or storage quotas may prevent saving preferences.
   }
@@ -114,9 +133,14 @@ function toast(message) {
   toastTimer = setTimeout(() => { $("toast").hidden = true; }, 3600);
 }
 
-async function request(path, params = {}, { signal, timeout = 40000, binary = false } = {}) {
+function apiURL(path, params) {
   const url = new URL(path, location.origin);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return url;
+}
+
+async function request(path, params = {}, { signal, timeout = 40000, binary = false, direct = false } = {}) {
+  const url = direct ? new URL(path) : apiURL(path, params);
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
@@ -124,7 +148,9 @@ async function request(path, params = {}, { signal, timeout = 40000, binary = fa
   let expired = false;
   const timer = setTimeout(() => { expired = true; abort(); }, timeout);
   try {
-    const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    const response = await fetch(url, {
+      signal: controller.signal, cache: "no-store", credentials: direct ? "omit" : "same-origin",
+    });
     const contentType = response.headers.get("Content-Type") || "";
     if (contentType.includes("json")) {
       const payload = await response.json();
@@ -139,12 +165,43 @@ async function request(path, params = {}, { signal, timeout = 40000, binary = fa
     return { blob: await response.blob(), headers: response.headers };
   } catch (error) {
     if (expired) throw new Error("请求超时，请稍后重试。");
-    if (error instanceof TypeError) throw new Error("无法连接 NAS 音乐服务，请检查网络。");
+    if (error instanceof TypeError) throw new Error(direct ? "浏览器无法直接读取音源。" : "无法连接 NAS 音乐服务，请检查网络。");
     throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
   }
+}
+
+// Signed URLs and lyrics stay in memory, scoped to this page and quality.
+const mediaCache = new Map();
+const lyricCache = new Map();
+
+function remember(cache, key, data, lifetime) {
+  cache.delete(key);
+  cache.set(key, { data, expires: Date.now() + lifetime });
+  if (cache.size > 48) cache.delete(cache.keys().next().value);
+}
+
+function recall(cache, key) {
+  const entry = cache.get(key);
+  if (entry?.expires > Date.now()) return entry.data;
+  cache.delete(key);
+  return null;
+}
+
+function directURL(value) {
+  const url = mediaURL(value);
+  return url && new URL(url).origin !== location.origin ? url : "";
+}
+
+async function resolveMedia(id, quality, signal) {
+  const key = id + ":" + quality;
+  const data = recall(mediaCache, key) || await request("/song", { id, type: "url", level: quality }, { signal });
+  const url = directURL(data.url);
+  if (!url) throw new Error("这个音质没有可用的音源，可以尝试切换音质。");
+  if (!mediaCache.has(key)) remember(mediaCache, key, data, 60000);
+  return { ...data, url };
 }
 
 function readInput(raw, mode) {
@@ -177,6 +234,10 @@ function displayMode(mode, updateURL = true) {
   if (state.mode !== mode) {
     if (state.lookup?.target !== "download") state.lookup?.controller.abort();
     state.mode = mode;
+    if (mode === "download") {
+      $("download-format").value = effectiveDownloadFormat();
+      updateDownloadNote();
+    }
     window.scrollTo(0, 0);
   }
   if (updateURL && location.hash !== "#" + mode) history.pushState(null, "", "#" + mode);
@@ -193,6 +254,7 @@ function displayMode(mode, updateURL = true) {
   $("suggestions").hidden = mode !== "search";
   $("limit-label").hidden = mode !== "search";
   $("download-format-label").hidden = mode !== "download";
+  $("download-route-note").hidden = mode !== "download";
   for (const link of document.querySelectorAll("nav [data-mode]")) {
     if (link.dataset.mode === mode) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -203,7 +265,35 @@ function displayMode(mode, updateURL = true) {
 function getView() {
   if (state.mode === "favorites") return { title: "已收藏的歌曲", note: state.favorites.length + " 首", tracks: state.favorites };
   if (state.mode === "history") return { title: "最近播放的歌曲", note: state.history.length + " 首", tracks: state.history };
+  if (state.mode === "settings") return { title: "播放与下载", note: lanAccess ? "当前通过局域网访问。" : "当前通过外网访问，播放使用源站直连。" };
   return state.views[state.mode] || { title: "结果", tracks: [] };
+}
+
+function settingRow(key, label, note, options, selected) {
+  const id = "setting-" + key;
+  return '<div class="setting-row"><div><label for="' + id + '">' + esc(label) + '</label><p id="' + id + '-note">' + esc(note) +
+    '</p></div><select id="' + id + '" data-setting="' + key + '" aria-describedby="' + id + '-note">' +
+    options.map(([value, text]) => '<option value="' + esc(value) + '"' + (value === selected ? " selected" : "") +
+      ">" + esc(text) + "</option>").join("") + "</select></div>";
+}
+
+function settingsMarkup() {
+  const rows = [
+    settingRow("downloadFormat", "默认下载方式",
+      "自动选择时，外网从源站直连，局域网通过 NAS。外网选择通过 NAS 下载会使用隧道流量。",
+      Object.entries(downloadFormats), state.downloadFormat),
+    settingRow("quality", "默认音质", "用于播放、解析和下载，实际音质以源站返回为准。",
+      Object.entries(qualities), state.quality),
+    settingRow("order", "播放顺序", "应用于当前播放队列。", orders, state.order),
+    settingRow("translation", "歌词译文", "在有译文时显示双语歌词。", [["on", "显示"], ["off", "隐藏"]],
+      state.translated ? "on" : "off"),
+  ];
+  if (lanAccess) {
+    rows.splice(1, 0, settingRow("playbackRoute", "局域网播放来源",
+      "优先使用浏览器直连。设备无法播放源站时可改为通过 NAS。",
+      [["direct", "浏览器直连"], ["nas", "通过 NAS"]], state.playbackRoute));
+  }
+  return '<div class="settings-list">' + rows.join("") + "</div>";
 }
 
 function favorite(track) {
@@ -290,12 +380,18 @@ function renderResults() {
   message.dataset.kind = view.kind || "info";
   const content = $("result-content");
   content.setAttribute("aria-busy", String(view.kind === "loading"));
-  if (view.kind === "loading") {
+  if (state.mode === "settings") {
+    content.innerHTML = settingsMarkup();
+  } else if (view.kind === "loading") {
     content.innerHTML = '<div class="skeleton-row" aria-hidden="true"><span></span><span></span></div>'.repeat(3);
   } else if (view.kind === "error") {
     content.innerHTML = empty("info", "请调整输入或重试", "连接状态可以在右上角查看。");
   } else if (view.kind === "saved") {
     content.innerHTML = empty("download", view.filename || "文件已处理", view.savedMessage || "下载任务已完成。");
+  } else if (view.kind === "direct-link") {
+    content.innerHTML = empty("download", "可从源站保存", "如果浏览器打开了播放器，可在播放菜单中选择保存。") +
+      '<a class="quiet-button source-link" href="' + esc(view.url) +
+      '" target="_blank" rel="noopener noreferrer">' + icon("arrow-up-right") + "打开源站音频</a>";
   } else if (view.song || view.collection || view.tracks?.length) {
     content.innerHTML = detailCard(view) + (view.tracks?.length ? trackList(view.tracks) :
       view.collection ? empty("list", "没有返回曲目", "这张歌单或专辑可能没有公开曲目。") : "");
@@ -379,6 +475,8 @@ async function resolveSong(id, quality, signal) {
   }
   const song = songRecord(data);
   if (!song) throw new Error("服务没有返回有效的歌曲信息。");
+  if (directURL(data.url)) remember(mediaCache, song.id + ":" + quality, data, 60000);
+  if (typeof data.lyric === "string") remember(lyricCache, song.id, { lyric: data.lyric, translation: data.tlyric }, 300000);
   return { title: "单曲详情", note: "网易云音乐 ID " + song.id, song, songData: data, requested: quality, message };
 }
 
@@ -500,15 +598,30 @@ function displayCurrent(track) {
 }
 
 async function playAudio() {
+  const source = audio.src;
   try {
     await audio.play();
   } catch (error) {
-    if (error.name !== "AbortError") {
-      const message = error.name === "NotAllowedError" ? "点击播放按钮继续试听。" : "浏览器无法播放这个音源，请换一个音质。";
+    if (error.name !== "AbortError" && audio.src === source) {
+      const message = error.name === "NotAllowedError" ? "点击播放按钮继续试听。" : playbackError();
       setNowStatus(message, "error");
       toast(message);
     }
   }
+}
+
+function playbackError() {
+  if (lanAccess && state.current?.route === "direct") return "直连播放失败，可在设置中切换到 NAS 播放。";
+  return "音源播放失败，请尝试切换音质或检查网络。";
+}
+
+async function loadTrackLyrics(id, quality, signal) {
+  const cached = recall(lyricCache, id);
+  if (cached) return cached;
+  const data = await request("/song", { id, type: "lyric", level: quality }, { signal });
+  const lyrics = { lyric: data.lrc?.lyric || "", translation: data.tlyric?.lyric || "" };
+  remember(lyricCache, id, lyrics, 300000);
+  return lyrics;
 }
 
 async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = false } = {}) {
@@ -516,6 +629,7 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
   const controller = new AbortController();
   state.playRequest = controller;
   const quality = state.quality;
+  const route = state.playbackRoute;
   const signal = controller.signal;
   if (!keepCurrent) {
     audio.pause();
@@ -524,11 +638,8 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
     state.current = { track, requested: quality };
     setLyrics("", "");
     displayCurrent(track);
-    const songView = getView();
-    const detail = songView.song?.id === track.id ? songView.songData : null;
-    if (detail?.lyric) setLyrics(detail.lyric, detail.tlyric);
-    else request("/song", { id: track.id, type: "lyric", level: quality }, { signal }).then((data) => {
-      if (!signal.aborted && state.current?.track.id === track.id) setLyrics(data.lrc?.lyric, data.tlyric?.lyric);
+    loadTrackLyrics(track.id, quality, signal).then((data) => {
+      if (!signal.aborted && state.current?.track.id === track.id) setLyrics(data.lyric, data.translation);
     }).catch(() => {
       if (!signal.aborted && state.current?.track.id === track.id) $("lyrics").textContent = "歌词暂时无法加载。";
     });
@@ -536,11 +647,12 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
   enqueue([track], false);
   setNowStatus("正在获取音源…", "loading");
   try {
-    const data = await request("/song", { id: track.id, type: "url", level: quality }, { signal });
+    const data = route === "nas"
+      ? { url: apiURL("/download", { id: track.id, quality, format: "file" }).href }
+      : await resolveMedia(track.id, quality, signal);
     if (signal.aborted) return;
-    const stream = mediaURL(data.url);
-    if (!stream) throw new Error("这个音质没有可用的音源，可以尝试切换音质。");
-    state.current = { track, requested: quality, level: data.level, stream };
+    const stream = data.url;
+    state.current = { track, requested: quality, level: data.level, stream, route };
     audio.src = stream;
     if (seek > 0) {
       audio.addEventListener("loadedmetadata", () => {
@@ -565,7 +677,7 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
 
 function togglePlay(track = state.current?.track || state.queue[0]) {
   if (!track) return;
-  if (state.current?.track.id !== track.id || !audio.getAttribute("src")) {
+  if (state.current?.track.id !== track.id || !audio.getAttribute("src") || audio.error) {
     if (!state.playRequest || state.current?.track.id !== track.id) startTrack(track);
   } else if (audio.paused) {
     playAudio();
@@ -594,7 +706,9 @@ function changeTrack(direction, ended = false) {
 }
 
 function qualitySuffix() {
-  return state.current?.level ? " · " + (qualities[state.current.level] || state.current.level) : "";
+  if (!state.current?.stream) return "";
+  if (state.current.route === "nas") return " · NAS";
+  return " · 直连" + (state.current.level ? " · " + (qualities[state.current.level] || state.current.level) : "");
 }
 
 function syncPlayer() {
@@ -745,6 +859,14 @@ function downloadName(headers, track) {
   return (track.name || "网易云音乐") + "." + (format === "mpeg" ? "mp3" : format || "audio");
 }
 
+function directDownloadName(headers, track, source) {
+  const contentType = (headers.get("Content-Type") || "").match(/^audio\/([\w-]+)/i)?.[1];
+  const extension = source.type || contentType || new URL(source.url).pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1];
+  const format = String(extension || "").toLowerCase();
+  const suffix = { mpeg: "mp3", mp4: "m4a", "x-flac": "flac", "x-wav": "wav" }[format] || format;
+  return (track.name || "网易云音乐-" + (source.id || track.id)) + "." + (/^[a-z0-9]{2,5}$/.test(suffix) ? suffix : "audio");
+}
+
 function isDownloading(id) {
   return state.downloads.has(id);
 }
@@ -755,16 +877,40 @@ function syncDownloads(id, disabled) {
   }
 }
 
-async function downloadTrack(track, format = "file", signal) {
+function effectiveDownloadFormat() {
+  return state.downloadFormat === "auto" ? (lanAccess ? "file" : "direct") : state.downloadFormat;
+}
+
+async function downloadTrack(track, format = effectiveDownloadFormat(), signal) {
   if (isDownloading(track.id)) throw new Error("这首歌正在下载。");
+  const quality = state.quality;
   state.downloads.add(track.id);
   syncDownloads(track.id, true);
   if (!signal) toast("正在准备下载 · " + (track.name || "歌曲"));
   try {
-    const result = await request("/download", { id: track.id, quality: state.quality, format }, {
+    if (format === "direct") {
+      const source = await resolveMedia(track.id, quality, signal);
+      let result;
+      try {
+        result = await request(source.url, {}, { signal, binary: true, direct: true, timeout: 240000 });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (!signal) {
+          $("direct-download-link").href = source.url;
+          showDialog("direct-download-dialog");
+        }
+        return { title: "源站直连", kind: "direct-link", url: source.url };
+      }
+      const filename = directDownloadName(result.headers, track, source);
+      saveBlob(result.blob, filename);
+      toast("已从源站直连下载");
+      return { title: "源站直连下载完成", kind: "saved", filename, savedMessage: "可以在浏览器的下载记录中找到该文件。" };
+    }
+    const result = await request("/download", { id: track.id, quality, format }, {
       signal, binary: format === "file", timeout: 240000,
     });
     if (format === "json") {
+      if (!signal) toast("已保存到 NAS");
       return { title: "已保存到服务器", kind: "saved", filename: result.filename, savedMessage: [result.file_size_formatted, result.file_path].filter(Boolean).join(" · ") };
     }
     const filename = downloadName(result.headers, track);
@@ -777,6 +923,34 @@ async function downloadTrack(track, format = "file", signal) {
   }
 }
 
+function renderServiceDetails() {
+  const health = state.serviceHealth;
+  const info = state.serviceInfo;
+  const details = [
+    ["访问方式", lanAccess ? "局域网访问" : "外网访问 · 默认直连音源"],
+    ["服务版本", info?.version || health?.version || "未知"],
+    ["Cookie 文件", health ? (health.cookie_status === "valid" ? "已读取" : "未读取到") : "未知"],
+    ["API 信息", info ? "可读取" : state.serviceInfoFailed ? "读取失败" : ""],
+    ["支持音质", (info?.supported_qualities || []).map((key) => qualities[key] || key).join("、")],
+  ];
+  $("service-details").innerHTML = details.filter(([, value]) => value).map(([label, value]) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>").join("");
+}
+
+let serviceInfoRequest;
+function loadServiceInfo(refresh = false) {
+  if (serviceInfoRequest || (state.serviceInfo && !refresh)) return;
+  serviceInfoRequest = request("/api/info", {}, { timeout: 8000 }).then((data) => {
+    state.serviceInfo = data;
+    state.serviceInfoFailed = false;
+  }).catch(() => {
+    state.serviceInfo = null;
+    state.serviceInfoFailed = true;
+  }).finally(() => {
+    serviceInfoRequest = null;
+    renderServiceDetails();
+  });
+}
+
 async function checkService() {
   const check = ++state.serviceCheck;
   const dots = [$("connection-dot"), $("rail-status")];
@@ -784,20 +958,18 @@ async function checkService() {
   $("connection-text").textContent = "正在连接";
   $("rail-caption").textContent = "正在连接";
   $("service-message").textContent = "正在检查 NAS API…";
-  const [health, info] = await Promise.allSettled([request("/health", {}, { timeout: 8000 }), request("/api/info", {}, { timeout: 8000 })]);
+  let health;
+  let errorMessage;
+  try { health = await request("/health", {}, { timeout: 8000 }); }
+  catch (error) { errorMessage = error.message; }
   if (state.serviceCheck !== check) return;
-  const running = health.status === "fulfilled";
+  const running = Boolean(health);
   dots.forEach((dot) => { dot.dataset.state = running ? "ok" : "error"; });
   $("connection-text").textContent = running ? "服务在线" : "服务不可达";
   $("rail-caption").textContent = $("connection-text").textContent;
-  $("service-message").textContent = running ? "NAS 音乐服务在线。" : health.reason.message;
-  const details = [
-    ["服务版本", info.value?.version || health.value?.version || "未知"],
-    ["Cookie 文件", health.value?.cookie_status === "valid" ? "已读取" : running ? "未读取到" : "未知"],
-    ["API 信息", info.status === "fulfilled" ? "可读取" : "读取失败"],
-    ["支持音质", (info.value?.supported_qualities || []).map((key) => qualities[key] || key).join("、")],
-  ];
-  $("service-details").innerHTML = details.filter(([, value]) => value).map(([label, value]) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>").join("");
+  $("service-message").textContent = running ? "NAS 音乐服务在线。" : errorMessage;
+  state.serviceHealth = health || null;
+  renderServiceDetails();
 }
 
 function showDialog(id) {
@@ -866,8 +1038,9 @@ async function copyLink() {
 }
 
 const actions = {
-  service: () => showDialog("service-dialog"),
-  "refresh-service": checkService,
+  service: () => { showDialog("service-dialog"); loadServiceInfo(); },
+  "open-settings": () => { $("service-dialog").close(); displayMode("settings"); $("main").focus(); },
+  "refresh-service": () => { checkService(); loadServiceInfo(true); },
   queue: () => { showDialog("queue-dialog"); renderQueue(); },
   close: (_, button) => button.closest("dialog")?.close(),
   play: (track) => togglePlay(track),
@@ -957,15 +1130,53 @@ window.addEventListener("hashchange", () => {
 });
 $("lookup-form").addEventListener("submit", (event) => { event.preventDefault(); lookup($("query").value); });
 $("query").addEventListener("input", () => { state.queries[state.mode] = $("query").value; });
-$("quality").innerHTML = Object.entries(qualities).map(([value, label]) => '<option value="' + value + '">' + esc(label) + "</option>").join("");
-$("quality").value = state.quality;
-$("quality").addEventListener("change", () => {
-  state.quality = $("quality").value;
+$("download-format").value = effectiveDownloadFormat();
+function updateDownloadNote() {
+  const notes = {
+    direct: "浏览器从网易云源站取文件，使用源文件的标签。",
+    file: lanAccess ? "NAS 会尝试写入封面和标签，然后通过局域网发送文件。" :
+      "音频会经过隧道。普通下载可选「源站直连下载」以节省隧道流量。",
+    json: "文件留在 NAS 的下载目录，浏览器只接收完成状态。",
+  };
+  $("download-route-note").textContent = notes[$("download-format").value];
+}
+$("download-format").addEventListener("change", updateDownloadNote);
+updateDownloadNote();
+function setPlaybackRoute(value) {
+  state.playbackRoute = lanAccess && value === "nas" ? "nas" : "direct";
+  persist();
+  if (state.current) {
+    const autoPlay = !audio.paused || !!audio.error;
+    startTrack(state.current.track, { autoPlay, seek: audio.currentTime, keepCurrent: Boolean(state.current.stream) });
+  }
+}
+
+function setQuality(value) {
+  state.quality = value;
+  $("quality").value = value;
   persist();
   if (state.current?.stream) startTrack(state.current.track, { autoPlay: !audio.paused, seek: audio.currentTime, keepCurrent: true });
   else if (state.playRequest && state.current) startTrack(state.current.track);
   if (state.mode === "song" && getView().song) lookup(getView().song.id, "song");
+}
+
+const settingsActions = {
+  downloadFormat: (value) => { state.downloadFormat = value; persist(); },
+  playbackRoute: setPlaybackRoute,
+  quality: setQuality,
+  order: (value) => { state.order = value; persist(); syncPlayer(); },
+  translation: (value) => { state.translated = value === "on"; persist(); renderLyrics(); },
+};
+$("result-content").addEventListener("change", (event) => {
+  const update = settingsActions[event.target.dataset.setting];
+  if (!update) return;
+  update(event.target.value);
+  toast("设置已保存");
 });
+
+$("quality").innerHTML = Object.entries(qualities).map(([value, label]) => '<option value="' + value + '">' + esc(label) + "</option>").join("");
+$("quality").value = state.quality;
+$("quality").addEventListener("change", () => setQuality($("quality").value));
 const savedVolume = Number(saved.volume);
 audio.volume = Number.isFinite(savedVolume) ? Math.min(1, Math.max(0, savedVolume)) : 0.75;
 $("volume").value = audio.volume;
@@ -980,7 +1191,10 @@ audio.addEventListener("playing", () => {
 });
 audio.addEventListener("pause", () => { if (audio.getAttribute("src")) setNowStatus("已暂停" + qualitySuffix(), "ok"); syncPlayer(); });
 audio.addEventListener("error", () => {
-  if (audio.getAttribute("src")) setNowStatus("音源播放失败，可以换一个音质。", "error");
+  if (audio.getAttribute("src")) {
+    if (state.current?.route === "direct") mediaCache.delete(state.current.track.id + ":" + state.current.requested);
+    setNowStatus(playbackError(), "error");
+  }
   syncPlayer();
 });
 audio.addEventListener("waiting", () => { if (!audio.paused && audio.getAttribute("src")) setNowStatus("正在缓冲…", "loading"); });

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#171413">
+  <meta name="referrer" content="no-referrer">
   <meta name="description" content="搜索、试听、解析和下载网易云音乐的自托管音乐工作台。">
   <title>回声 · 网易云音乐工作台</title>
   <link rel="icon" href="/static/studio-mark.svg" type="image/svg+xml">
@@ -28,6 +29,7 @@
         <p class="nav-label nav-gap">我的音乐</p>
         <a href="#favorites" data-mode="favorites"><svg><use href="/static/studio-icons.svg#heart"/></svg><span>收藏</span><small id="favorite-count">0</small></a>
         <a href="#history" data-mode="history"><svg><use href="/static/studio-icons.svg#clock"/></svg><span>最近播放</span></a>
+        <a href="#settings" data-mode="settings"><svg><use href="/static/studio-icons.svg#settings"/></svg><span>设置</span></a>
       </nav>
       <button class="service-link" type="button" data-action="service">
         <span class="status-dot" id="rail-status"></span>
@@ -46,7 +48,7 @@
         <a href="#search" data-mode="search" aria-current="page">搜索</a><a href="#song" data-mode="song">单曲</a>
         <a href="#playlist" data-mode="playlist">歌单</a><a href="#album" data-mode="album">专辑</a>
         <a href="#download" data-mode="download">下载</a><a href="#favorites" data-mode="favorites">收藏</a>
-        <a href="#history" data-mode="history">最近</a>
+        <a href="#history" data-mode="history">最近</a><a href="#settings" data-mode="settings">设置</a>
       </nav>
       <div class="content">
         <section class="hero" id="hero">
@@ -68,9 +70,10 @@
                   <select id="search-limit"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
                 </label>
                 <label class="inline-select" id="download-format-label" hidden>保存方式
-                  <select id="download-format"><option value="file">下载到设备</option><option value="json">保存到服务器</option></select>
+                  <select id="download-format"><option value="direct">源站直连下载</option><option value="file">通过 NAS 下载（含标签）</option><option value="json">仅保存到 NAS</option></select>
                 </label>
               </div>
+              <p id="download-route-note" class="route-note" hidden></p>
             </form>
           </div>
         </section>
@@ -113,12 +116,21 @@
       <div class="volume-control"><button type="button" class="icon-button" data-action="mute" id="mute" aria-label="静音" title="静音"><svg><use href="/static/studio-icons.svg#volume"/></svg></button><input type="range" id="volume" min="0" max="1" step="0.01" value="0.75" aria-label="音量"></div>
       <button type="button" class="icon-button queue-button" data-action="queue" aria-label="播放队列" title="播放队列"><svg><use href="/static/studio-icons.svg#list"/></svg><small id="queue-count" hidden></small></button>
     </div>
-    <audio id="audio" preload="metadata"></audio>
+    <audio id="audio" preload="none"></audio>
   </footer>
 
   <dialog id="service-dialog" class="dialog" aria-labelledby="service-title">
     <header><h2 id="service-title">服务状态</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
-    <div class="dialog-body"><p id="service-message" role="status">正在检查 NAS API…</p><dl id="service-details"></dl><div class="dialog-actions"><button type="button" class="quiet-button" data-action="refresh-service">重新检测</button></div></div>
+    <div class="dialog-body">
+      <p id="service-message" role="status">正在检查 NAS API…</p><dl id="service-details"></dl>
+      <div class="dialog-actions"><button type="button" class="quiet-button" data-action="open-settings">打开设置</button><button type="button" class="quiet-button" data-action="refresh-service">重新检测</button></div>
+    </div>
+  </dialog>
+  <dialog id="direct-download-dialog" class="dialog" aria-labelledby="direct-download-title">
+    <header><h2 id="direct-download-title">打开源站音频</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
+    <div class="dialog-body"><p>浏览器无法直接保存这个音源。打开源站后，可用浏览器的播放菜单保存。</p>
+      <div class="dialog-actions"><a id="direct-download-link" class="quiet-button" target="_blank" rel="noopener noreferrer">打开源站音频</a></div>
+    </div>
   </dialog>
   <dialog id="queue-dialog" class="dialog" aria-labelledby="queue-title">
     <header><h2 id="queue-title">播放队列 <span id="queue-title-count"></span></h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
