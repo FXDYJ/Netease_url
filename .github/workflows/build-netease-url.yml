@@ -4,9 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Rebuild even if the upstream commit has not changed
+        description: Rebuild even if the backend and frontend revisions have not changed
         type: boolean
         default: false
+  push:
+    branches: [main]
+    paths:
+      - templates/index.html
+      - 'static/studio*'
+      - .github/workflows/build-netease-url.yml
   schedule:
     - cron: '23 20 * * *'
 
@@ -26,7 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - name: Check the upstream revision
+      - name: Check backend and frontend revisions
         id: upstream
         shell: bash
         env:
@@ -36,20 +42,23 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/netease-url"
           revision=$(git ls-remote --exit-code "$UPSTREAM" refs/heads/main | cut -f1)
           [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          ui_revision="$GITHUB_SHA"
 
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           if manifest=$(docker buildx imagetools inspect --raw "$image:latest"); then
             published_revision=$(jq -r '.annotations["org.opencontainers.image.revision"] // ""' <<< "$manifest")
-            if [[ "$published_revision" == "$revision" && "$FORCE_REBUILD" != "true" ]]; then
-              echo "Upstream revision $revision is already published."
+            published_ui=$(jq -r '.annotations["io.github.fxdyj.netease-url.frontend.revision"] // ""' <<< "$manifest")
+            if [[ "$published_revision" == "$revision" && "$published_ui" == "$ui_revision" && "$FORCE_REBUILD" != "true" ]]; then
+              echo "Backend $revision and frontend $ui_revision are already published."
               exit 0
             fi
           fi
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "candidate=$image:sha-$revision-ui-$ui_revision" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare a clean build context
+      - name: Prepare upstream backend and fork frontend
         if: steps.upstream.outputs.revision != ''
         shell: bash
         env:
@@ -61,6 +70,14 @@ jobs:
           mkdir image-context
           git -C upstream-git -c core.autocrlf=false archive FETCH_HEAD | tar -xf - -C image-context
           rm -f image-context/cookie.txt image-context/.env
+
+          git init --quiet frontend-git
+          git -C frontend-git fetch --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C frontend-git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C frontend-git -c core.autocrlf=false archive FETCH_HEAD -- \
+            templates/index.html static/studio.css static/studio.js \
+            static/studio-icons.svg static/studio-mark.svg static/studio-vinyl.svg |
+            tar -xf - -C image-context
 
       - name: Enable ARM64 emulation
         if: steps.upstream.outputs.revision != ''
@@ -76,33 +93,47 @@ jobs:
         if: steps.upstream.outputs.revision != ''
         shell: bash
         env:
-          IMAGE: ${{ steps.upstream.outputs.image }}
+          CANDIDATE: ${{ steps.upstream.outputs.candidate }}
           REVISION: ${{ steps.upstream.outputs.revision }}
         run: |
           docker buildx build image-context \
             --platform linux/amd64,linux/arm64 \
             --annotation "index:org.opencontainers.image.revision=$REVISION" \
+            --annotation "index:io.github.fxdyj.netease-url.frontend.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.revision=$REVISION" \
-            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --tag "$IMAGE:sha-$REVISION" \
+            --label "io.github.fxdyj.netease-url.frontend.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag "$CANDIDATE" \
             --push
 
-      - name: Smoke-test both architectures and promote latest
+      - name: Start both architectures and promote latest
         if: steps.upstream.outputs.revision != ''
         shell: bash
         env:
           IMAGE: ${{ steps.upstream.outputs.image }}
-          REVISION: ${{ steps.upstream.outputs.revision }}
+          CANDIDATE: ${{ steps.upstream.outputs.candidate }}
         run: |
-          revision_image="$IMAGE:sha-$REVISION"
           for platform in linux/amd64 linux/arm64; do
-            docker run --rm --pull always --platform "$platform" --entrypoint sh "$revision_image" -ec '
+            container=$(docker run --detach --pull always --platform "$platform" \
+              --publish 127.0.0.1:15000:5000 "$CANDIDATE")
+            trap 'docker logs "$container"; docker rm -f "$container" >/dev/null' EXIT
+            docker exec "$container" sh -ec '
               test ! -e /app/cookie.txt
               test ! -e /app/.env
               ffmpeg -version >/dev/null
-              python -c "from main import app; assert app.test_client().get(\"/health\").status_code == 200"
             '
+            origin=http://127.0.0.1:15000
+            curl --fail --silent --show-error --retry 10 --retry-delay 1 --retry-connrefused "$origin/health" |
+              jq -e '.success and .data.service == "running"'
+            home=$(curl --fail --silent --show-error "$origin/")
+            grep -Fq '/static/studio.js' <<< "$home"
+            for asset in studio.js studio.css studio-icons.svg studio-mark.svg studio-vinyl.svg; do
+              curl --fail --silent --show-error --output /dev/null "$origin/static/$asset"
+            done
+            echo "$platform: server startup, health, frontend and FFmpeg checks passed"
+            docker rm -f "$container" >/dev/null
+            trap - EXIT
           done
 
-          docker buildx imagetools create --tag "$IMAGE:latest" "$revision_image"
-          echo "Published \`$IMAGE:latest\` and \`$revision_image\`." >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools create --tag "$IMAGE:latest" "$CANDIDATE"
+          printf 'Published %s and %s.\n' "$IMAGE:latest" "$CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
