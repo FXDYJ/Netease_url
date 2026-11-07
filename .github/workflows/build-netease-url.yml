@@ -123,8 +123,9 @@ jobs:
               ffmpeg -version >/dev/null
             '
             origin=http://127.0.0.1:15000
-            curl --fail --silent --show-error --retry 10 --retry-delay 1 --retry-connrefused "$origin/health" |
-              jq -e '.success and .data.service == "running"'
+            health=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
+              --retry 12 --retry-delay 1 --retry-all-errors "$origin/health")
+            jq -e '.success and .data.service == "running"' <<< "$health"
             home=$(curl --fail --silent --show-error "$origin/")
             grep -Fq '/static/studio.js' <<< "$home"
             for asset in studio.js studio.css studio-icons.svg studio-mark.svg studio-vinyl.svg; do
