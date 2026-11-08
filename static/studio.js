@@ -1113,6 +1113,7 @@ function saveProgress(force = false) {
 function setNowStatus(text, kind = "") {
   $("play-status").textContent = text;
   $("expanded-status").textContent = text;
+  if ($("immersive-dialog").open) $("immersive-status").textContent = text;
   $("play-status-dot").dataset.state = kind;
 }
 
@@ -1137,6 +1138,7 @@ function displayCurrent(track, recommendation) {
   applyCover($("now-image"), track, 520, $("now-cover"));
   applyCover($("mini-image"), track, 100);
   applyCover($("expanded-image"), track, 100);
+  renderImmersiveInfo();
   if ("mediaSession" in navigator && typeof MediaMetadata !== "undefined") {
     const art = state.dataSaver ? "" : mediaURL(track.pic, 300);
     navigator.mediaSession.metadata = new MediaMetadata({ title: track.name, artist: track.artists, album: track.album, artwork: art ? [{ src: art }] : [] });
@@ -1231,7 +1233,8 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
     setLyrics("", "");
     displayCurrent(track, recommendation);
     renderResume();
-    if (!state.dataSaver || ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true")) loadCurrentLyrics();
+    if (!state.dataSaver || $("immersive-dialog").open ||
+        ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true")) loadCurrentLyrics();
   }
   if (!recommendation && navigation && !keepCurrent && !automatic && !inserted) enqueue([track], false);
   if (!keepCurrent) {
@@ -1523,6 +1526,7 @@ function qualitySuffix() {
 function syncPrevious() {
   $("previous").disabled = audio.currentTime < 3 && state.trailIndex < 1 && !previousQueueTrack();
   $("expanded-previous").disabled = $("previous").disabled;
+  $("immersive-previous").disabled = $("previous").disabled;
 }
 
 function syncPlayer() {
@@ -1564,6 +1568,7 @@ function syncPlayer() {
   const muted = audio.muted || audio.volume === 0;
   setIcon($("mute"), muted ? "muted" : "volume");
   labelButton($("mute"), muted ? "取消静音" : "静音");
+  updateImmersiveControls();
   refreshTrackButtons();
 }
 
@@ -1600,7 +1605,7 @@ function setLyrics(raw, translation) {
   renderLyrics();
 }
 
-function lyricMarkup(lines, raw, seekable = true) {
+function lyricMarkup(lines, raw, seekable = true, startIndex = 0) {
   if (!lines.length) {
     const text = raw.replace(/^\[[a-z]+:[^\]]*\]\s*/gim, "").trim();
     return text ? '<div class="empty-lyrics">' + text.split(/\r?\n/).map((line) => '<p class="plain-lyric-line">' + esc(line) + '</p>').join("") + '</div>' :
@@ -1608,7 +1613,7 @@ function lyricMarkup(lines, raw, seekable = true) {
   }
   return lines.map((line, index) => {
     const body = esc(line.text) + (state.translated && line.translation ? "<small>" + esc(line.translation) + "</small>" : "");
-    return seekable ? '<button type="button" class="lyric-line" data-action="seek-line" data-index="' + index +
+    return seekable ? '<button type="button" class="lyric-line" data-action="seek-line" data-index="' + (startIndex + index) +
       '" data-time="' + line.time + '">' + body + "</button>" : '<p class="lyric-line">' + body + "</p>";
   }).join("");
 }
@@ -1620,6 +1625,7 @@ function renderLyrics() {
     (!state.current?.lyricRequest ? '<button type="button" class="quiet-button" data-action="load-current-lyrics">加载歌词</button>' : '') :
     lyricMarkup(state.lyrics, state.lrc);
   if ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true") renderLyricsDialog();
+  renderImmersiveLyrics();
   $("translate-toggle").disabled = !state.lyrics.some((line) => line.translation);
   $("translate-toggle").setAttribute("aria-pressed", String(state.translated));
   $("lyrics-export").disabled = !state.lrc;
@@ -1630,14 +1636,16 @@ function highlightLyrics() {
   if (!state.lyrics.length) return;
   let first = 0;
   let end = state.lyrics.length;
+  const lyricTime = audio.currentTime + 0.05 - lyricDelaySeconds();
   while (first < end) {
     const middle = (first + end) >> 1;
-    if (state.lyrics[middle].time <= audio.currentTime + 0.05) first = middle + 1;
+    if (state.lyrics[middle].time <= lyricTime) first = middle + 1;
     else end = middle;
   }
   const index = first - 1;
   if (index === state.lyricIndex) return;
   state.lyricIndex = index;
+  syncImmersiveLyric();
   const panels = [$("lyrics")];
   if ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true") panels.push($("mobile-lyrics-content"));
   for (const panel of panels) {
@@ -1658,7 +1666,8 @@ function timeText(value) {
 
 function syncTimeline() {
   const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
-  for (const prefix of ["", "expanded-"]) {
+  const immersiveOpen = $("immersive-dialog").open;
+  for (const prefix of immersiveOpen ? ["", "expanded-", "immersive-"] : ["", "expanded-"]) {
     const seek = $(prefix + "seek");
     seek.max = duration;
     seek.disabled = duration <= 0;
@@ -1667,6 +1676,7 @@ function syncTimeline() {
     $(prefix + "duration").textContent = timeText(duration);
   }
   syncPrevious();
+  if (immersiveOpen) updateImmersiveLyricControls();
   if ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true") renderPractice();
   highlightLyrics();
 }
@@ -2100,6 +2110,7 @@ function toggleBookmark(_, control) {
 
 const actions = {
   ...listeningActions,
+  ...immersiveActions,
   service: () => { showDialog("service-dialog"); loadServiceInfo(); },
   "open-settings": () => { $("service-dialog").close(); displayMode("settings"); $("main").focus(); },
   "refresh-service": () => { checkService(); loadServiceInfo(true); },
@@ -2290,10 +2301,11 @@ const actions = {
     const { track, matchedTime } = inspectedLyrics || {};
     if (!track || !Number.isFinite(matchedTime)) return;
     $("lyrics-dialog").close();
+    const seek = Math.max(0, matchedTime + lyricDelaySeconds(track.id));
     if (state.current?.track.id === track.id && Number.isFinite(audio.duration) && !audio.error) {
-      seekPlayback(Math.min(matchedTime, Math.max(0, audio.duration - 1)));
+      seekPlayback(Math.min(seek, Math.max(0, audio.duration - 1)));
       playAudio();
-    } else startTrack(track, { seek: matchedTime });
+    } else startTrack(track, { seek });
   },
   "dialog-lrc": () => {
     const follow = $("lyrics-dialog").dataset.follow === "true";
@@ -2305,7 +2317,9 @@ const actions = {
     exportLyrics(follow ? state.translation : inspectedLyrics.translation, name + "（译文）");
   },
   "seek-line": (_, button) => {
-    if (audio.getAttribute("src")) seekPlayback(Number(button.dataset.time));
+    if (audio.getAttribute("src") && Number.isFinite(audio.duration)) {
+      seekPlayback(Math.min(Number(button.dataset.time) + lyricDelaySeconds(), Math.max(0, audio.duration - 0.1)));
+    }
   },
 };
 
@@ -2406,7 +2420,7 @@ const settingsActions = {
     const current = state.current;
     if (current) displayCurrent(current.track, current.recommendation);
     if (!state.dataSaver) loadCurrentLyrics();
-    else if (!$("lyrics-dialog").open) current?.lyricRequest?.abort();
+    else if (!$("lyrics-dialog").open && !$("immersive-dialog").open) current?.lyricRequest?.abort();
     persist();
     renderResults();
     $("setting-dataSaver").focus();
@@ -2542,6 +2556,7 @@ $("browse-categories").innerHTML = categories.map((category) =>
   '<button type="button" data-category="' + category + '" aria-pressed="false">' +
   (category === "charts" ? "排行榜" : category) + "</button>").join("");
 initListeningTools();
+initImmersive();
 openLocation();
 renderQueue();
 syncPlayer();

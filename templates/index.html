@@ -8,9 +8,11 @@
   <meta name="description" content="搜索、试听、解析和下载网易云音乐的自托管音乐工作台。">
   <title>回声 · 网易云音乐工作台</title>
   <link rel="icon" href="/static/studio-mark.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/studio.css?v=tools-1">
+  <link rel="stylesheet" href="/static/studio.css?v=immersive-1">
+  <link rel="stylesheet" href="/static/studio-immersive.css?v=immersive-1">
   <script src="/static/studio-tools.js?v=tools-1" defer></script>
-  <script src="/static/studio.js?v=tools-1" defer></script>
+  <script src="/static/studio-immersive.js?v=immersive-1" defer></script>
+  <script src="/static/studio.js?v=immersive-1" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主内容</a>
@@ -134,7 +136,7 @@
     </main>
 
     <aside class="now" id="now-panel" aria-labelledby="now-title">
-      <div class="now-top"><h2 id="now-title">正在播放</h2><button type="button" class="icon-button" data-action="queue" aria-label="打开播放队列" title="播放队列"><svg><use href="/static/studio-icons.svg#list"/></svg></button></div>
+      <div class="now-top"><h2 id="now-title">正在播放</h2><div><button type="button" class="quiet-button" data-action="immersive">沉浸模式</button><button type="button" class="icon-button" data-action="queue" aria-label="打开播放队列" title="播放队列"><svg><use href="/static/studio-icons.svg#list"/></svg></button></div></div>
       <div id="now-cover" class="now-cover empty-cover"><img id="now-image" src="/static/studio-vinyl.svg" alt="" hidden></div>
       <div class="now-caption"><div class="ellipsis"><h3 id="now-name">尚未播放</h3><p id="now-artist">从搜索结果中选一首歌</p></div><button type="button" class="icon-button" id="now-like" data-action="now-like" aria-label="收藏当前歌曲" title="收藏当前歌曲" disabled><svg><use href="/static/studio-icons.svg#heart"/></svg></button></div>
       <div class="now-status"><span class="status-dot" id="play-status-dot"></span><span id="play-status" role="status">等待选曲</span></div>
@@ -163,6 +165,7 @@
       <div class="timeline"><time id="elapsed">0:00</time><input type="range" id="seek" min="0" max="0" value="0" step="0.1" aria-label="播放进度" disabled><time id="duration">0:00</time></div>
     </div>
     <div class="player-settings">
+      <button type="button" class="icon-button" id="immersive-open" data-action="immersive" aria-label="沉浸播放" title="沉浸播放"><svg><use href="/static/studio-icons.svg?v=immersive-1#expand"/></svg></button>
       <label class="quality-select"><span class="sr-only">选择默认音质</span><svg aria-hidden="true"><use href="/static/studio-icons.svg#wave"/></svg><select id="quality"></select></label>
       <div class="volume-control"><button type="button" class="icon-button" data-action="mute" id="mute" aria-label="静音" title="静音"><svg><use href="/static/studio-icons.svg#volume"/></svg></button><input type="range" id="volume" min="0" max="1" step="0.01" value="0.75" aria-label="音量"></div>
       <button type="button" class="icon-button queue-button" data-action="queue" aria-label="播放队列" title="播放队列"><svg><use href="/static/studio-icons.svg#list"/></svg><small id="queue-count" hidden></small></button>
@@ -228,6 +231,7 @@
         <button type="button" class="icon-button" id="expanded-next" data-action="next" aria-label="下一首" disabled><svg><use href="/static/studio-icons.svg#next"/></svg></button>
       </div>
       <div class="expanded-actions">
+        <button type="button" class="quiet-button" data-action="immersive">沉浸播放</button>
         <button type="button" class="quiet-button" data-action="expanded-queue">队列</button>
         <button type="button" class="quiet-button" data-action="save-track" disabled>存入歌单</button>
         <button type="button" class="quiet-button" data-action="seed-radio" disabled>相似电台</button>
@@ -259,6 +263,65 @@
     </div>
     <p id="lyric-copy-status" role="status" hidden></p><textarea id="lyric-copy-value" rows="4" aria-label="可手动复制的歌词" readonly hidden></textarea>
     <div id="mobile-lyrics-content" class="lyrics mobile-lyrics-content"></div></div>
+  </dialog>
+  <dialog id="immersive-dialog" class="immersive" aria-labelledby="immersive-title">
+    <header class="immersive-header">
+      <button type="button" class="quiet-button immersive-back" data-action="close" autofocus><svg aria-hidden="true"><use href="/static/studio-icons.svg#down"/></svg><span>收起</span></button>
+      <h2 id="immersive-title">沉浸播放</h2>
+      <button type="button" class="icon-button" id="immersive-fullscreen" data-action="immersive-fullscreen" aria-label="浏览器全屏" title="浏览器全屏" hidden><svg aria-hidden="true"><use href="/static/studio-icons.svg?v=immersive-1#expand"/></svg></button>
+    </header>
+    <div class="immersive-main">
+      <section class="immersive-info" aria-labelledby="immersive-name">
+        <div class="immersive-cover" id="immersive-cover"><svg aria-hidden="true"><use href="/static/studio-icons.svg#note"/></svg><img id="immersive-image" src="/static/studio-mark.svg" alt="" hidden></div>
+        <div class="immersive-meta">
+          <h3 id="immersive-name">尚未播放</h3>
+          <p id="immersive-artist">选择一首歌开始收听</p>
+          <p id="immersive-album" hidden></p>
+          <p id="immersive-status" class="immersive-status" role="status">等待选曲</p>
+        </div>
+        <button type="button" class="icon-button" id="immersive-like" data-action="now-like" aria-label="收藏当前歌曲" aria-pressed="false" disabled><svg aria-hidden="true"><use href="/static/studio-icons.svg#heart"/></svg></button>
+      </section>
+      <section class="immersive-lyrics" aria-labelledby="immersive-lyrics-title">
+        <div class="immersive-lyrics-head">
+          <h3 id="immersive-lyrics-title">歌词</h3>
+          <div class="immersive-lyrics-actions">
+            <label class="sr-only" for="immersive-lyric-view">歌词显示范围</label>
+            <select id="immersive-lyric-view"><option value="all">完整歌词</option><option value="nearby">最近几句</option></select>
+            <button type="button" class="quiet-button" id="immersive-translate" data-action="translate" aria-pressed="true" hidden>译文</button>
+            <details id="immersive-options" class="immersive-options">
+              <summary class="quiet-button"><svg aria-hidden="true"><use href="/static/studio-icons.svg#settings"/></svg>歌词设置</summary>
+              <div class="immersive-options-body">
+                <label>歌词字号<select id="immersive-font"><option value="small">较小</option><option value="normal">大字</option><option value="large">特大</option></select></label>
+                <label><input id="immersive-follow" type="checkbox" checked> 自动跟随</label>
+                <div class="immersive-offset">
+                  <span>时间校准 <output id="immersive-offset">0.0 秒</output></span>
+                  <div><button type="button" class="quiet-button" data-action="immersive-earlier">提前 0.2 秒</button><button type="button" class="quiet-button" data-action="immersive-later">延后 0.2 秒</button><button type="button" class="quiet-button" data-action="immersive-offset-reset">重置</button></div>
+                </div>
+                <div class="immersive-line-actions">
+                  <button type="button" class="quiet-button" id="immersive-copy" data-action="immersive-copy" disabled>复制当前句</button>
+                  <button type="button" class="quiet-button" id="immersive-loop" data-action="immersive-loop" aria-pressed="false" disabled>循环当前句</button>
+                </div>
+                <p id="immersive-feedback" role="status" hidden></p>
+                <textarea id="immersive-copy-value" rows="2" aria-label="可手动复制的歌词" readonly hidden></textarea>
+              </div>
+            </details>
+          </div>
+        </div>
+        <div id="immersive-lines" class="immersive-lines" tabindex="0" role="region" aria-label="可滚动歌词"></div>
+        <button type="button" class="quiet-button immersive-return" id="immersive-return" data-action="immersive-return" hidden>回到当前句</button>
+      </section>
+    </div>
+    <footer class="immersive-footer" aria-label="沉浸播放控制">
+      <div class="timeline immersive-timeline"><time id="immersive-elapsed">0:00</time><input id="immersive-seek" type="range" min="0" max="0" step="0.1" value="0" aria-label="沉浸播放进度" disabled><time id="immersive-duration">0:00</time></div>
+      <div class="immersive-transport">
+        <button type="button" class="icon-button" id="immersive-mode" data-action="play-mode" aria-label="播放顺序" title="播放顺序"><svg aria-hidden="true"><use href="/static/studio-icons.svg#ordered"/></svg></button>
+        <button type="button" class="icon-button" id="immersive-previous" data-action="previous" aria-label="上一首" disabled><svg aria-hidden="true"><use href="/static/studio-icons.svg#previous"/></svg></button>
+        <button type="button" class="play-button" id="immersive-toggle" data-action="toggle-play" aria-label="播放" disabled><svg aria-hidden="true"><use href="/static/studio-icons.svg#play"/></svg></button>
+        <button type="button" class="icon-button" id="immersive-next" data-action="next" aria-label="下一首" disabled><svg aria-hidden="true"><use href="/static/studio-icons.svg#next"/></svg></button>
+        <button type="button" class="icon-button" data-action="queue" aria-label="播放队列" title="播放队列"><svg aria-hidden="true"><use href="/static/studio-icons.svg#list"/></svg></button>
+      </div>
+      <div class="immersive-volume"><button type="button" class="icon-button" id="immersive-mute" data-action="mute" aria-label="静音"><svg aria-hidden="true"><use href="/static/studio-icons.svg#volume"/></svg></button><input type="range" id="immersive-volume" min="0" max="1" step="0.01" value="0.75" aria-label="沉浸播放音量"></div>
+    </footer>
   </dialog>
   <dialog id="share-dialog" class="dialog" aria-labelledby="share-title">
     <header><h2 id="share-title">分享页面</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
