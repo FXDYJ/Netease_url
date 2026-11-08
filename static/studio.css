@@ -199,6 +199,12 @@ select option { background: var(--panel); color: var(--text); }
 .track-meta:hover strong { color: var(--accent); }
 .track-meta small, .track-album { color: var(--muted); font-size: 11px; }
 .track-meta small { margin-top: 4px; }
+.lyric-result { min-width: 0; }
+.lyric-result .track-meta { width: 100%; }
+.lyric-match { display: flex; align-items: center; gap: 5px; max-width: 100%; min-height: 28px; padding: 2px 0; color: var(--accent-hover); font-size: 11px; text-align: left; }
+.lyric-match span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lyric-match svg { width: 13px; height: 13px; }
+.lyric-match:hover span { text-decoration: underline; }
 .track-album { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-cover, .mini-cover { width: 39px; height: 39px; border-radius: 6px; background: #432d25; color: var(--accent); display: grid; place-items: center; flex: none; overflow: hidden; position: relative; }
 .track-cover img, .mini-cover img { width: 100%; height: 100%; position: absolute; object-fit: cover; }
@@ -294,6 +300,9 @@ input[type="range"]:disabled { cursor: default; opacity: .54; }
 .setting-row select { min-width: 0; width: 100%; min-height: 37px; padding: 5px 8px; background: var(--panel); border: 1px solid #59433a; border-radius: 6px; font-size: 13px; }
 .queue-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .queue-row.is-current .track-meta strong { color: var(--accent); }
+.queue-section + .queue-section { margin-top: 17px; }
+.queue-section h3 { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding-block: 5px; border-bottom: 1px solid var(--line); color: var(--text); font-size: 14px; }
+.queue-section h3 small { color: var(--muted); font-size: 11px; font-weight: 500; }
 .mobile-lyrics-content { max-height: 59dvh; }
 .lyrics-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
 .lyrics-tools:has(> :not([hidden])) { padding-bottom: 9px; border-bottom: 1px solid var(--line); }

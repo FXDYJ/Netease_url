@@ -25,7 +25,7 @@ const screens = {
   history: ["最近播放", "最近播放", "在当前浏览器里接着听。"],
   settings: ["设置", "偏好设置", "修改后立即生效。局域网地址与外网域名的偏好分别保存。"],
 };
-const searchTypes = { song: "歌曲", artist: "歌手", album: "专辑", playlist: "歌单" };
+const searchTypes = { song: "歌曲", artist: "歌手", album: "专辑", playlist: "歌单", lyric: "歌词" };
 const categories = ["charts", "华语", "流行", "民谣", "轻音乐", "摇滚", "电子", "学习", "工作", "睡眠", "运动"];
 const initialSearch = { title: "快速试听", note: "从这几首开始，或搜索你想听的歌。", tracks: [] };
 const quickTracks = [
@@ -91,12 +91,19 @@ function bookmarkFrom(item) {
 
 const saved = restore();
 const savedProgress = songRecord(saved.resume?.track);
+const savedQueue = tracksFrom(saved.queue);
+const savedById = new Map(savedQueue.map((track) => [track.id, track]));
+const restoredIds = (values) => new Set(Array.isArray(values) ? values.filter((id) => savedById.has(id)) : []);
+const savedQueries = (Array.isArray(saved.queryHistory) ? saved.queryHistory : [])
+  .map((value) => typeof value === "string" ? { keyword: value, type: "song" } : value)
+  .filter((value) => typeof value?.keyword === "string" && value.keyword.length <= 100 && Object.hasOwn(searchTypes, value.type))
+  .slice(0, 6);
 const state = {
   mode: "search",
   views: { search: { ...initialSearch, tracks: quickTracks } },
   queries: {},
   searchType: "song",
-  queryHistory: Array.isArray(saved.queryHistory) ? saved.queryHistory.filter((query) => typeof query === "string" && query.length <= 100).slice(0, 6) : [],
+  queryHistory: savedQueries,
   category: "charts",
   batch: false,
   selected: new Set(),
@@ -104,15 +111,22 @@ const state = {
   favorites: tracksFrom(saved.favorites),
   history: tracksFrom(saved.history),
   bookmarks: Array.isArray(saved.bookmarks) ? saved.bookmarks.map(bookmarkFrom).filter(Boolean).slice(0, 200) : [],
-  queue: tracksFrom(saved.queue),
-  priority: Array.isArray(saved.priority) ? saved.priority.filter(isId).slice(0, 50) : [],
+  queue: savedQueue,
+  nextUp: uniqueTracks(Array.isArray(saved.nextUp) ? tracksFrom(saved.nextUp) :
+    Array.isArray(saved.priority) ? saved.priority.map((id) => savedById.get(id)).filter(Boolean) : []).slice(0, 50),
+  playedEarly: restoredIds(saved.playedEarly),
+  shuffled: restoredIds(saved.shuffled),
+  queueUndo: null,
   collections: (Array.isArray(saved.collections) ? saved.collections : [])
     .filter((item) => typeof item?.name === "string" && typeof item.id === "string" && /^[a-z0-9-]{1,80}$/.test(item.id))
     .map((item) => ({ id: item.id, name: item.name.slice(0, 48), tracks: tracksFrom(item.tracks) })),
   collectionId: null,
   collectionEdit: null,
   resume: savedProgress && Number.isFinite(saved.resume.time)
-    ? { track: savedProgress, time: Math.max(0, saved.resume.time) } : null,
+    ? { track: savedProgress, time: Math.max(0, saved.resume.time),
+      queueCursor: saved.resume.queueCursor === null ? null : savedById.has(saved.resume.queueCursor) ? saved.resume.queueCursor : savedProgress.id,
+      inserted: saved.resume.inserted === true,
+      reason: typeof saved.resume.reason === "string" ? saved.resume.reason.slice(0, 200) : "" } : null,
   radioMode: Object.hasOwn(radioModes, saved.radioMode) ? saved.radioMode : "off",
   discovery: Object.hasOwn(discoveryLevels, saved.discovery) ? saved.discovery : "balanced",
   hiddenTracks: tracksFrom(saved.hiddenTracks).slice(0, 200),
@@ -149,9 +163,10 @@ const state = {
 
 function persist() {
   try {
-    const { favorites, history, bookmarks, queue, priority, collections, resume, radioMode, discovery, hiddenTracks, queryHistory,
+    const { favorites, history, bookmarks, queue, nextUp, playedEarly, shuffled, collections, resume, radioMode, discovery, hiddenTracks, queryHistory,
       artistTaste, quality, order, translated, playbackRoute, downloadFormat } = state;
-    localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, bookmarks, queue, priority, collections, resume, radioMode, discovery,
+    localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, bookmarks, queue, nextUp, playedEarly: [...playedEarly],
+      shuffled: [...shuffled], collections, resume, radioMode, discovery,
       hiddenTracks, queryHistory, artistTaste: [...artistTaste], quality, order, translated, playbackRoute, downloadFormat, volume: audio.volume }));
     return true;
   } catch {
@@ -408,15 +423,19 @@ function trackMeta(track, action) {
     "</strong><small>" + esc(track.artists || "未知歌手") + "</small></span></button>";
 }
 
-function trackList(tracks, localCollection = false) {
+function trackList(tracks, localCollection = false, lyricMatches = {}) {
   const rows = tracks.map((track, index) => {
     const liked = favorite(track);
     const active = state.current?.track.id === track.id;
     const playing = active && !audio.paused;
+    const match = lyricMatches[track.id];
     return '<div class="track-grid track-row' + (active ? " is-current" : "") + '" data-row="' + track.id + '">' +
       (state.batch ? '<input class="track-check" type="checkbox" data-select-track="' + track.id + '" aria-label="选择 ' + esc(track.name) + '"' +
         (state.selected.has(track.id) ? " checked" : "") + ">" :
-        '<span class="track-number">' + String(index + 1).padStart(2, "0") + "</span>") + trackMeta(track, "details") +
+        '<span class="track-number">' + String(index + 1).padStart(2, "0") + "</span>") +
+      (match ? '<div class="lyric-result">' + trackMeta(track, "details") +
+        '<button type="button" class="lyric-match" data-action="song-lyrics" data-track="' + track.id +
+        '" title="查看匹配歌词">' + icon("text") + '<span>' + esc(match) + "</span></button></div>" : trackMeta(track, "details")) +
       '<span class="track-album" title="' + esc(track.album) + '">' + esc(track.album || "—") + '</span><div class="track-actions">' +
       button("play", playing ? "pause" : "play", (playing ? "暂停 " : "播放 ") + track.name, track, { extra: "play-row" }) +
       button("enqueue", "list-plus", "加入队列 " + track.name, track) +
@@ -519,7 +538,7 @@ function renderResults() {
     content.innerHTML = empty("download", "可从源站保存", "如果浏览器打开了播放器，可在播放菜单中选择保存。") +
       '<a class="quiet-button source-link" href="' + esc(view.url) +
       '" target="_blank" rel="noopener noreferrer">' + icon("arrow-up-right") + "打开源站音频</a>";
-  } else if (view.artist || view.entries) {
+  } else if (view.artist || view.entries || view.lyricMatches) {
     content.innerHTML = catalogMarkup(view, visibleTracks, filteredList);
   } else if (view.song || view.collection || view.tracks?.length) {
     content.innerHTML = detailCard(view) + (view.tracks?.length ? (filteredList || trackList(visibleTracks)) :
@@ -545,9 +564,12 @@ function renderCatalogControls() {
   if (state.mode === "search") {
     const suggestions = $("suggestions");
     const previous = state.queryHistory;
-    const words = previous.length ? previous : ["孙燕姿", "房东的猫", "陈奕迅"];
+    const words = previous.length ? previous : state.searchType === "lyric"
+      ? [{ keyword: "夜空中最亮的星 能否听清", type: "lyric" }]
+      : ["孙燕姿", "房东的猫", "陈奕迅"].map((keyword) => ({ keyword, type: state.searchType }));
     const markup = "<span>" + (previous.length ? "最近搜索" : "试试") + "</span>" +
-      words.map((word) => '<button type="button" data-query="' + esc(word) + '" title="' + esc(word) + '">' + esc(word) + "</button>").join("") +
+      words.map(({ keyword, type }) => '<button type="button" data-query="' + esc(keyword) + '" data-query-type="' + type +
+        '" title="' + esc(searchTypes[type] + " · " + keyword) + '">' + esc(keyword) + "</button>").join("") +
       (previous.length ? '<button type="button" class="clear-search" data-action="clear-search">清除</button>' : "");
     if (suggestions.innerHTML !== markup) suggestions.innerHTML = markup;
     for (const button of $("search-types").querySelectorAll("button")) {
@@ -580,7 +602,7 @@ function catalogMarkup(view, tracks, filteredList) {
       '<span class="ellipsis"><strong>' + esc(entry.name || searchTypes[type]) + "</strong><small>" +
       esc(meta || searchTypes[type]) + "</small></span></a>";
   });
-  const body = view.tracks?.length ? filteredList || trackList(tracks) : links.length
+  const body = view.tracks?.length ? filteredList || trackList(tracks, false, view.lyricMatches) : links.length
     ? '<div class="catalog-grid">' + links.join("") + "</div>"
     : !view.raw && state.mode === "search" ? empty("search", "等待搜索", "在上方输入想找的" + searchTypes[state.searchType] + "。")
       : empty("search", "没有返回作品", "可以试试其他分类或更短的关键词。");
@@ -629,8 +651,9 @@ function renderResume() {
   card.hidden = state.mode !== "search" || !state.resume || Boolean(state.current);
   if (card.hidden) return;
   const { track, time } = state.resume;
+  const queued = state.queue.length || state.nextUp.length;
   card.querySelector(".resume-meta").innerHTML = cover(track) + '<span class="ellipsis"><strong>' + esc(track.name) +
-    "</strong><small>" + esc([track.artists, timeText(time)].filter(Boolean).join(" · ")) + "</small></span>";
+    "</strong><small>" + esc([track.artists, timeText(time), queued ? "续接上次队列" : ""].filter(Boolean).join(" · ")) + "</small></span>";
 }
 
 function libraryMarkup(collection, visibleTracks, filteredList) {
@@ -768,6 +791,10 @@ async function lookup(raw, mode = state.mode, { page = 0, section = "songs" } = 
       const data = await request("/search", { keyword: input.keyword, limit: $("search-limit").value }, { signal });
       const tracks = tracksFrom(data);
       result = { title: "搜索结果", note: "“" + input.keyword + "” · " + tracks.length + " 首", tracks };
+    } else if (target === "search" && searchType === "lyric") {
+      const data = await request("/api/catalog", { kind: "lyric", q: input.keyword, page }, metadataOptions);
+      result = { title: "歌词搜索结果", note: "“" + input.keyword + "” · 点击匹配片段查看完整歌词",
+        tracks: tracksFrom(data.tracks), lyricMatches: data.matches || {}, more: page < 9 && data.more };
     } else if (target === "search") {
       const data = await request("/api/catalog", { kind: searchType, q: input.keyword, page }, metadataOptions);
       result = { title: searchTypes[searchType] + "搜索结果", note: "“" + input.keyword + "”",
@@ -795,7 +822,8 @@ async function lookup(raw, mode = state.mode, { page = 0, section = "songs" } = 
     if (!signal.aborted) {
       state.views[target] = { ...result, raw, page, section };
       if (target === "search" && input.keyword.length <= 100) {
-        state.queryHistory = [input.keyword, ...state.queryHistory.filter((word) => word !== input.keyword)].slice(0, 6);
+        state.queryHistory = [{ keyword: input.keyword, type: searchType }, ...state.queryHistory.filter((item) =>
+          item.keyword !== input.keyword)].slice(0, 6);
         persist();
       }
     }
@@ -831,7 +859,7 @@ async function resolveSong(id, quality, signal) {
 
 function findTrack(id) {
   const view = getView();
-  return [view.song, ...(view.tracks || []), state.current?.track, state.radioAnchor, ...state.queue, ...state.favorites,
+  return [view.song, ...(view.tracks || []), state.current?.track, state.radioAnchor, ...state.nextUp, ...state.queue, ...state.favorites,
     ...state.history, ...state.hiddenTracks, ...quickTracks]
     .find((item) => item?.id === id);
 }
@@ -853,6 +881,7 @@ function enqueue(tracks, feedback = true) {
     state.queue.push(track);
     count++;
   }
+  if (count) state.queueUndo = null;
   persist();
   renderQueue();
   syncPlayer();
@@ -861,10 +890,18 @@ function enqueue(tracks, feedback = true) {
 
 function playNext(track) {
   if (!track || state.current?.track.id === track.id) return;
-  state.queue = state.queue.filter((item) => item.id !== track.id);
-  const cursor = state.queue.findIndex((item) => item.id === state.current?.queueCursor);
-  state.queue.splice(cursor + 1, 0, track);
-  state.priority = [track.id, ...state.priority.filter((id) => id !== track.id)].slice(0, 50);
+  if (state.nextUp.length >= 50 && !state.nextUp.some((item) => item.id === track.id)) {
+    toast("优先播放已排满，请先整理队列。");
+    return;
+  }
+  state.nextUp = [track, ...state.nextUp.filter((item) => item.id !== track.id)];
+  state.queueUndo = null;
+  const advancing = Boolean(state.advance);
+  if (state.advance) {
+    state.advance.abort();
+    state.advance = null;
+    state.radioStatus = "";
+  }
   persist();
   renderQueue();
   if ($("queue-dialog").open) {
@@ -872,50 +909,82 @@ function playNext(track) {
   }
   syncPlayer();
   toast("下一首播放「" + track.name + "」");
+  if (advancing) nextTrack();
+}
+
+function queueSection(title, list, type) {
+  return '<section class="queue-section" data-list="' + type + '"><h3>' + title + '<small>' + list.length + ' 首</small></h3>' +
+    list.map((track, index) => '<div class="queue-row' + (state.current?.track.id === track.id ? " is-current" : "") + '">' +
+      trackMeta(track, type === "next" ? "play-queued-next" : "play") + '<div>' +
+      (type === "next" ? '<small class="queue-priority">' + (index === 0 ? "接下来" : "优先") + '</small>' :
+        state.nextUp.some((item) => item.id === track.id) ? '<small class="queue-priority">已安排</small>' :
+        button("play-next", "list-plus", "下一首播放 " + track.name, track, { disabled: state.current?.track.id === track.id })) +
+      button("queue-up", "up", "上移 " + track.name, track, { disabled: index === 0 }) +
+      button("queue-down", "down", "下移 " + track.name, track, { disabled: index === list.length - 1 }) +
+      button("queue-remove", "close", "移出队列 " + track.name, track) + "</div></div>").join("") + "</section>";
+}
+
+function playList(tracks, first = tracks[0]) {
+  if (!first) return;
+  state.queue = uniqueTracks(tracks);
+  state.queueUndo = null;
+  state.playedEarly.clear();
+  state.shuffled.clear();
+  state.trail = state.trail.slice(0, state.trailIndex + 1);
+  startTrack(first);
 }
 
 function renderQueue() {
-  $("queue-count").hidden = !state.queue.length;
-  $("queue-count").textContent = state.queue.length;
-  $("queue-title-count").textContent = state.queue.length ? "· " + state.queue.length + " 首" : "";
-  $("clear-queue").disabled = !state.queue.length;
-  $("save-queue").disabled = !state.queue.length;
+  const count = uniqueTracks([...state.nextUp, ...state.queue]).length;
+  $("queue-count").hidden = !count;
+  $("queue-count").textContent = count;
+  $("queue-title-count").textContent = count ? "· " + count + " 首" : "";
+  $("clear-queue").disabled = !count;
+  $("save-queue").disabled = !count;
+  $("restore-queue").hidden = !state.queueUndo;
+  renderResume();
   renderSleep();
   if (!$("queue-dialog").open) return;
   const reason = state.current?.recommendation;
   const current = state.current?.track;
   $("queue-radio").innerHTML = (state.radioMode !== "off" || current)
     ? '<div class="queue-radio-note">' + icon("radio") + '<div><strong>' +
-      esc(reason ? reason.reason : "心动电台 · " + radioModes[state.radioMode]) + "</strong><p>" +
-      esc(state.radioStatus || "手动安排的下一首先播放。") + "</p></div>" +
+      esc(reason ? reason.reason : current ? "当前曲目 · " + current.name : "心动电台 · " + radioModes[state.radioMode]) + "</strong><p>" +
+      esc(state.radioStatus || (state.nextUp.length ? "优先曲目播完后，接回主队列。" : "手动安排的下一首先播放。")) + "</p></div>" +
       (current ? button("now-like", "heart", favorite(current) ? "取消收藏当前歌曲" : "收藏当前歌曲", null, { pressed: favorite(current) }) : "") +
       (reason ? button("hide-recommendation", "ban", "不再推荐当前歌曲") : "") + "</div>" : "";
-  $("queue-rows").innerHTML = state.queue.length ? state.queue.map((track, index) => (
-    '<div class="queue-row' + (state.current?.track.id === track.id ? " is-current" : "") + '">' + trackMeta(track, "play") + '<div>' +
-    (state.priority.includes(track.id) ? '<small class="queue-priority">接下来</small>' :
-      button("play-next", "list-plus", "下一首播放 " + track.name, track, { disabled: state.current?.track.id === track.id })) +
-    button("queue-up", "up", "上移 " + track.name, track, { disabled: index === 0 }) +
-    button("queue-down", "down", "下移 " + track.name, track, { disabled: index === state.queue.length - 1 }) +
-    button("queue-remove", "close", "移出队列 " + track.name, track) + "</div></div>"
-  )).join("") : empty("list", "播放队列为空", "点击歌曲旁的加入队列按钮，或加入整张歌单。");
+  $("queue-rows").innerHTML = count ?
+    (state.nextUp.length ? queueSection("优先播放", state.nextUp, "next") : "") +
+    (state.queue.length ? queueSection("主队列", state.queue, "main") : "") :
+    empty("list", "播放队列为空", "点击歌曲旁的加入队列按钮，或加入整张歌单。");
 }
 
-function changeQueue(track, action) {
-  const index = state.queue.findIndex((item) => item.id === track.id);
+function changeQueue(track, control) {
+  const action = control.dataset.action;
+  const section = control.closest(".queue-section")?.dataset.list;
+  const list = section === "next" ? state.nextUp : state.queue;
+  const index = list.findIndex((item) => item.id === track.id);
   if (index < 0) return;
-  if (action === "queue-remove") state.queue.splice(index, 1);
-  else {
+  if (action === "queue-remove") {
+    list.splice(index, 1);
+    if (section === "main") {
+      state.playedEarly.delete(track.id);
+      state.shuffled.delete(track.id);
+      if (state.current?.queueCursor === track.id) state.current.queueCursor = list[index - 1]?.id || null;
+      if (state.resume?.queueCursor === track.id) state.resume.queueCursor = list[index - 1]?.id || null;
+    }
+  } else {
     const destination = index + (action === "queue-up" ? -1 : 1);
-    if (destination < 0 || destination >= state.queue.length) return;
-    [state.queue[index], state.queue[destination]] = [state.queue[destination], state.queue[index]];
+    if (destination < 0 || destination >= list.length) return;
+    [list[index], list[destination]] = [list[destination], list[index]];
   }
-  state.priority = state.priority.filter((id) => id !== track.id);
+  state.queueUndo = null;
   persist();
   renderQueue();
   syncPlayer();
-  const controls = [...$("queue-rows").querySelectorAll("button")];
+  const controls = [...$("queue-rows").querySelectorAll('[data-list="' + section + '"] button')];
   const preferred = controls.find((control) => control.dataset.track === track.id && control.dataset.action === action && !control.disabled);
-  const fallback = controls.find((control) => control.dataset.track === track.id && control.dataset.action === "play");
+  const fallback = controls.find((control) => control.dataset.track === track.id && control.classList.contains("track-meta"));
   (preferred || fallback || controls[0] || $("queue-dialog").querySelector('[data-action="close"]')).focus();
 }
 
@@ -992,7 +1061,8 @@ function saveProgress(force = false) {
   if (!current?.tracked || !Number.isFinite(audio.currentTime)) return;
   if (!force && Date.now() - lastProgressWrite < 5000) return;
   lastProgressWrite = Date.now();
-  state.resume = { track: current.track, time: audio.ended ? 0 : audio.currentTime };
+  state.resume = { track: current.track, time: audio.ended ? 0 : audio.currentTime,
+    queueCursor: current.queueCursor, inserted: current.inserted, reason: current.recommendation?.reason || "" };
   persist();
 }
 
@@ -1059,7 +1129,7 @@ async function loadTrackLyrics(id, quality, signal) {
 }
 
 async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = false, recommendation = null,
-  queueCursor = track.id, navigation = true, advance = null, automatic = false } = {}) {
+  queueCursor = track.id, navigation = true, advance = null, automatic = false, inserted = false } = {}) {
   if (state.advance && state.advance !== advance) {
     state.advance.abort();
     state.advance = null;
@@ -1080,10 +1150,11 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
       state.radioStreak = 1;
       state.radioStatus = "";
     }
+    saveProgress(true);
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
-    state.current = { track, requested: quality, recommendation, queueCursor, navigation };
+    state.current = { track, requested: quality, recommendation, queueCursor, navigation, inserted };
     setLyrics("", "");
     displayCurrent(track, recommendation);
     renderResume();
@@ -1093,9 +1164,13 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
       if (!signal.aborted && state.current?.track.id === track.id) $("lyrics").textContent = "歌词暂时无法加载。";
     });
   }
-  if (!recommendation && navigation && !keepCurrent && !automatic) enqueue([track], false);
-  if (!keepCurrent && state.priority.includes(track.id)) {
-    state.priority = state.priority.filter((id) => id !== track.id);
+  if (!recommendation && navigation && !keepCurrent && !automatic && !inserted) enqueue([track], false);
+  if (!keepCurrent) {
+    state.nextUp = state.nextUp.filter((item) => item.id !== track.id);
+    if (state.queue.some((item) => item.id === track.id)) {
+      if (inserted) state.playedEarly.add(track.id);
+      if (state.order === "shuffle") state.shuffled.add(track.id);
+    }
     persist();
   }
   renderQueue();
@@ -1133,12 +1208,15 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
   }
 }
 
-function togglePlay(track = state.current?.track || state.queue[0]) {
+function togglePlay(track = state.current?.track) {
+  if (!track && state.nextUp.length) { nextTrack(); return; }
+  track ||= state.queue[0];
   if (!track) return;
   if (state.current?.track.id !== track.id || !audio.getAttribute("src") || audio.error) {
     if (!state.playRequest || state.current?.track.id !== track.id) {
       const current = state.current?.track.id === track.id ? state.current : null;
-      startTrack(track, current?.recommendation ? { recommendation: current.recommendation, queueCursor: current.queueCursor } : {});
+      startTrack(track, current ? { recommendation: current.recommendation, queueCursor: current.queueCursor,
+        inserted: current.inserted, automatic: current.inserted } : {});
     }
   } else if (audio.paused) {
     playAudio();
@@ -1210,18 +1288,15 @@ function prefetchSimilar(seed) {
   loadSimilar(seed).catch(() => { /* A failed prefetch can be retried when switching tracks. */ });
 }
 
-function queueNext() {
-  const priority = state.queue.find((track) => track.id === state.priority[0]);
-  if (priority) return priority;
+function queueStep() {
   const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
   if (state.order === "shuffle" && state.queue.length > 1) {
-    const previous = state.trail.slice(0, state.trailIndex + 1).reverse().map(({ track }) => track.id);
-    const choices = state.queue.filter((track) => track.id !== state.current?.track.id);
-    const fresh = choices.filter((track) => !previous.includes(track.id));
-    return fresh.length ? fresh[Math.floor(Math.random() * fresh.length)] :
-      choices.reduce((oldest, track) => previous.indexOf(track.id) > previous.indexOf(oldest.id) ? track : oldest);
+    const fresh = state.queue.filter((track) => !state.shuffled.has(track.id) && track.id !== state.current?.track.id);
+    const choices = fresh.length ? fresh : state.queue.filter((track) => track.id !== state.current?.track.id);
+    return { track: choices[Math.floor(Math.random() * choices.length)], resetShuffle: !fresh.length };
   }
-  return state.queue[cursor + 1] || (state.order === "repeat-all" ? state.queue[0] : null);
+  const track = state.queue.find((item, index) => index > cursor && !state.playedEarly.has(item.id));
+  return track ? { track } : { track: state.order === "repeat-all" ? state.queue[0] : undefined, wrap: true };
 }
 
 function shouldRecommend(next) {
@@ -1282,13 +1357,24 @@ async function recommendations(next, signal) {
 function previousTrack() {
   if (audio.currentTime >= 3) { audio.currentTime = 0; return; }
   if (state.trailIndex > 0) {
-    const { track, recommendation, queueCursor } = state.trail[--state.trailIndex];
-    startTrack(track, { recommendation, queueCursor, navigation: false });
+    const { track, recommendation, queueCursor, inserted } = state.trail[--state.trailIndex];
+    startTrack(track, { recommendation, queueCursor, inserted, navigation: false });
     return;
   }
-  const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
-  const previous = state.queue[cursor > 0 ? cursor - 1 : state.order === "repeat-all" ? state.queue.length - 1 : -1];
+  const previous = previousQueueTrack();
   if (previous) startTrack(previous, { automatic: true });
+}
+
+function previousQueueTrack() {
+  const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
+  if (cursor >= 0 && state.current.track.id !== state.current.queueCursor) return state.queue[cursor];
+  return state.queue[cursor > 0 ? cursor - 1 : state.order === "repeat-all" ? state.queue.length - 1 : -1];
+}
+
+function playQueuedNext(track) {
+  if (!track) return;
+  state.radioStreak++;
+  startTrack(track, { inserted: true, automatic: true, queueCursor: state.current?.queueCursor ?? null });
 }
 
 async function nextTrack(ended = false, forceRadio = false) {
@@ -1299,14 +1385,19 @@ async function nextTrack(ended = false, forceRadio = false) {
     playAudio();
     return;
   }
-  const next = queueNext();
-  const priority = next && state.priority.includes(next.id);
-  if (!priority && !forceRadio && state.trailIndex + 1 < state.trail.length) {
-    const { track, recommendation, queueCursor } = state.trail[++state.trailIndex];
-    startTrack(track, { recommendation, queueCursor, navigation: false });
+  const priority = state.nextUp[0];
+  if (priority) {
+    playQueuedNext(priority);
     return;
   }
-  if (!priority && (forceRadio || shouldRecommend(next))) {
+  const step = queueStep();
+  const next = step.track;
+  if (!forceRadio && state.trailIndex + 1 < state.trail.length) {
+    const { track, recommendation, queueCursor, inserted } = state.trail[++state.trailIndex];
+    startTrack(track, { recommendation, queueCursor, inserted, navigation: false });
+    return;
+  }
+  if (forceRadio || shouldRecommend(next)) {
     const advance = new AbortController();
     state.advance = advance;
     state.radioStatus = "正在挑选推荐…";
@@ -1346,6 +1437,8 @@ async function nextTrack(ended = false, forceRadio = false) {
     }
   }
   if (next) {
+    if (step.wrap) state.playedEarly.clear();
+    if (step.resetShuffle) state.shuffled.clear();
     state.radioStreak++;
     startTrack(next, { automatic: true });
   } else if (ended) setNowStatus("已播完队列" + qualitySuffix(), "ok");
@@ -1358,18 +1451,14 @@ function qualitySuffix() {
 }
 
 function syncPrevious() {
-  const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
-  $("previous").disabled = audio.currentTime < 3 && state.trailIndex < 1 &&
-    (!state.queue.length || cursor <= 0 && state.order !== "repeat-all");
+  $("previous").disabled = audio.currentTime < 3 && state.trailIndex < 1 && !previousQueueTrack();
   $("expanded-previous").disabled = $("previous").disabled;
 }
 
 function syncPlayer() {
   const track = state.current?.track;
-  const activeIndex = state.queue.findIndex((item) => item.id === state.current?.queueCursor);
-  const wrap = state.order === "repeat-all";
   const toggle = $("play-toggle");
-  toggle.disabled = (!track && !state.queue.length) || (!!state.playRequest && !audio.getAttribute("src"));
+  toggle.disabled = (!track && !state.queue.length && !state.nextUp.length) || (!!state.playRequest && !audio.getAttribute("src"));
   const playing = !audio.paused;
   setIcon(toggle, playing ? "pause" : "play");
   labelButton(toggle, playing ? "暂停" : "播放");
@@ -1378,10 +1467,8 @@ function syncPlayer() {
   setIcon(expandedToggle, playing ? "pause" : "play");
   labelButton(expandedToggle, playing ? "暂停" : "播放");
   syncPrevious();
-  $("next").disabled = Boolean(state.advance) || (!state.priority.length && state.trailIndex + 1 >= state.trail.length &&
-    !((track || state.queue.length) && state.radioMode !== "off") &&
-    (state.queue.length === 0 || (activeIndex === state.queue.length - 1 && !wrap &&
-      (state.order !== "shuffle" || state.queue.length === 1))));
+  $("next").disabled = Boolean(state.advance) || (!state.nextUp.length && !queueStep().track &&
+    state.trailIndex + 1 >= state.trail.length && !((track || state.queue.length) && state.radioMode !== "off"));
   $("expanded-next").disabled = $("next").disabled;
   for (const id of ["now-panel", "expanded-player"]) {
     $(id).querySelector('[data-action="seed-radio"]').disabled = !track;
@@ -1790,15 +1877,32 @@ function renderLyricsDialog() {
   $("dialog-translation").setAttribute("aria-pressed", String(state.translated));
   $("dialog-lrc").hidden = !detail.raw;
   $("dialog-lrc-translation").hidden = !detail.translation;
+  $("dialog-play-match").hidden = true;
   if (follow) {
     state.lyricIndex = -1;
     highlightLyrics();
+  } else if (detail.match) {
+    const normalize = (text) => text.normalize("NFKC").toLowerCase().replace(/[\p{P}\p{S}\s]/gu, "");
+    const needle = normalize(detail.match);
+    const lines = [...panel.querySelectorAll(".lyric-line")];
+    const index = needle ? lines.findIndex((line) => {
+      const text = normalize(line.firstChild?.textContent || "");
+      return text && (text.includes(needle) || needle.includes(text) && text.length >= 4);
+    }) : -1;
+    if (index >= 0) {
+      lines[index].classList.add("active");
+      lines[index].scrollIntoView({ block: "center" });
+      detail.matchedTime = detail.lines[index]?.time;
+      $("dialog-play-match").hidden = !Number.isFinite(detail.matchedTime);
+    }
   }
 }
 
 async function showSongLyrics(track) {
   if (!track) return;
-  const data = getView().songData;
+  const view = getView();
+  const data = view.songData;
+  const match = view.lyricMatches?.[track.id] || "";
   $("lyrics-dialog").dataset.follow = "false";
   inspectedLyrics = { raw: "", translation: "", lines: [], name: track.name };
   showDialog("lyrics-dialog");
@@ -1809,16 +1913,16 @@ async function showSongLyrics(track) {
     const context = inspectedLyrics;
     $("mobile-lyrics-content").textContent = "正在读取歌词…";
     try {
-      const result = await request("/song", { id: track.id, type: "lyric", level: state.quality });
+      const result = await loadTrackLyrics(track.id, state.quality);
       if (inspectedLyrics !== context || $("lyrics-dialog").dataset.follow === "true") return;
-      raw = result.lrc?.lyric;
-      translation = result.tlyric?.lyric;
+      raw = result.lyric;
+      translation = result.translation;
     } catch (error) {
       if (inspectedLyrics === context) $("mobile-lyrics-content").textContent = error.message;
       return;
     }
   }
-  inspectedLyrics = { raw: raw || "", translation: translation || "", lines: matchLyrics(raw || "", translation || ""), name: track.name };
+  inspectedLyrics = { raw: raw || "", translation: translation || "", lines: matchLyrics(raw || "", translation || ""), name: track.name, match, track };
   renderLyricsDialog();
 }
 
@@ -1923,18 +2027,16 @@ const actions = {
   "queue-radio": () => { $("queue-dialog").close(); displayMode("radio"); $("main").focus(); },
   "queue-timer": () => { $("queue-dialog").close(); displayMode("settings"); $("setting-sleepMode").focus(); },
   close: (_, button) => button.closest("dialog")?.close(),
-  play: (track) => togglePlay(track),
+  play: (track, control) => {
+    const view = getView();
+    if (track && control.closest(".track-row") && (view.collection || view.artist || view.localCollection) &&
+        (state.current?.track.id !== track.id || !audio.getAttribute("src"))) playList(view.tracks, track);
+    else togglePlay(track);
+  },
   enqueue: (track) => track && enqueue([track]),
   "play-next": playNext,
   "add-all": () => enqueue(getView().tracks || []),
-  "play-all": () => {
-    const tracks = uniqueTracks(getView().tracks || []);
-    if (!tracks.length) return;
-    state.queue = tracks;
-    state.priority = [];
-    persist();
-    startTrack(tracks[0]);
-  },
+  "play-all": () => playList(getView().tracks || []),
   "save-all": () => editCollection(getView().tracks || []),
   "batch-toggle": () => { state.batch ? resetBatch() : state.batch = true; renderResults(); },
   "batch-select": () => {
@@ -1952,7 +2054,7 @@ const actions = {
   "batch-library": batchLibrary,
   "export-library": exportLibrary,
   "import-library": () => $("import-library").click(),
-  "save-queue": () => editCollection(state.queue),
+  "save-queue": () => editCollection(uniqueTracks([...state.nextUp, ...state.queue])),
   "save-track": (track = state.current?.track) => track && editCollection([track]),
   "new-collection": () => editCollection([], "create"),
   "rename-collection": () => editCollection([], "rename"),
@@ -1983,8 +2085,9 @@ const actions = {
   },
   resume: () => {
     if (!state.resume) return;
-    const { track, time } = state.resume;
-    startTrack(track, { seek: time });
+    const { track, time, queueCursor, inserted, reason } = state.resume;
+    const recommendation = reason ? { reason } : null;
+    startTrack(track, { seek: time, queueCursor, inserted, recommendation, automatic: inserted || Boolean(reason) });
   },
   "seed-radio": seedRadio,
   "radio-next": () => nextTrack(false, true),
@@ -2021,16 +2124,30 @@ const actions = {
     if (!audio.volume) { audio.volume = 0.75; audio.muted = false; }
     else audio.muted = !audio.muted;
   },
-  "queue-up": (track) => track && changeQueue(track, "queue-up"),
-  "queue-down": (track) => track && changeQueue(track, "queue-down"),
-  "queue-remove": (track) => track && changeQueue(track, "queue-remove"),
+  "queue-up": (track, control) => track && changeQueue(track, control),
+  "queue-down": (track, control) => track && changeQueue(track, control),
+  "queue-remove": (track, control) => track && changeQueue(track, control),
+  "play-queued-next": playQueuedNext,
   "clear-queue": () => {
+    state.queueUndo = { queue: state.queue, nextUp: state.nextUp, playedEarly: state.playedEarly, shuffled: state.shuffled };
     state.queue = [];
-    state.priority = [];
+    state.nextUp = [];
+    state.playedEarly = new Set();
+    state.shuffled = new Set();
+    state.trail = state.trail.slice(0, state.trailIndex + 1);
     persist();
     renderQueue();
     syncPlayer();
-    $("queue-dialog").querySelector('[data-action="close"]').focus();
+    $("restore-queue").focus();
+  },
+  "restore-queue": () => {
+    if (!state.queueUndo) return;
+    Object.assign(state, state.queueUndo);
+    state.queueUndo = null;
+    persist();
+    renderQueue();
+    syncPlayer();
+    $("clear-queue").focus();
   },
   details: (track) => track && lookup(track.id, "song"),
   download: (track) => track && downloadTrack(track).catch((error) => toast(error.message)),
@@ -2065,6 +2182,15 @@ const actions = {
     renderLyricsDialog();
   },
   "song-lyrics": showSongLyrics,
+  "play-lyric-match": () => {
+    const { track, matchedTime } = inspectedLyrics || {};
+    if (!track || !Number.isFinite(matchedTime)) return;
+    $("lyrics-dialog").close();
+    if (state.current?.track.id === track.id && Number.isFinite(audio.duration) && !audio.error) {
+      audio.currentTime = Math.min(matchedTime, Math.max(0, audio.duration - 1));
+      playAudio();
+    } else startTrack(track, { seek: matchedTime });
+  },
   "dialog-lrc": () => {
     const follow = $("lyrics-dialog").dataset.follow === "true";
     exportLyrics(follow ? state.lrc : inspectedLyrics.raw, (follow ? state.current?.track.name : inspectedLyrics.name) || "歌词");
@@ -2095,8 +2221,14 @@ document.addEventListener("click", (event) => {
     state.category = control.dataset.category;
     lookup(state.category, "discover");
   } else if (control.dataset.query) {
-    $("query").value = control.dataset.query;
-    lookup(control.dataset.query, "search");
+    const { query, queryType } = control.dataset;
+    if (Object.hasOwn(searchTypes, queryType) && queryType !== state.searchType) {
+      state.searchType = queryType;
+      state.queries.search = query;
+      displayMode("search");
+    }
+    $("query").value = query;
+    lookup(query, "search");
   } else {
     const handler = actions[control.dataset.action];
     if (handler) handler(control.dataset.track ? findTrack(control.dataset.track) : undefined, control);
@@ -2193,11 +2325,12 @@ audio.addEventListener("playing", () => {
   const current = state.current;
   if (current) {
     if (!current.tracked && current.navigation) {
-      const { track, recommendation, queueCursor } = current;
-      state.trail = [...state.trail.slice(0, state.trailIndex + 1), { track, recommendation, queueCursor }].slice(-80);
+      const { track, recommendation, queueCursor, inserted } = current;
+      state.trail = [...state.trail.slice(0, state.trailIndex + 1), { track, recommendation, queueCursor, inserted }].slice(-80);
       state.trailIndex = state.trail.length - 1;
     }
     current.tracked = true;
+    saveProgress(true);
     recordPlay(current.track);
   }
   setNowStatus("正在播放" + qualitySuffix(), "ok");
@@ -2229,7 +2362,7 @@ audio.addEventListener("timeupdate", () => {
   const current = state.current;
   if (state.radioMode !== "off" && current?.tracked && !current.prefetched && audio.currentTime >= 12) {
     current.prefetched = true;
-    if (state.order !== "repeat-one" && shouldRecommend(queueNext())) {
+    if (state.order !== "repeat-one" && !state.nextUp.length && shouldRecommend(queueStep().track)) {
       const [seed] = radioSeeds();
       if (seed) prefetchSimilar(seed);
     }
@@ -2247,7 +2380,7 @@ document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || document.querySelector("dialog[open]")) return;
   if (event.target.closest?.("input,select,textarea,[contenteditable]")) return;
   if (event.key === "/") { event.preventDefault(); displayMode("search"); $("query").focus(); }
-  if (event.code === "Space" && !event.target.closest?.("button,a") && (state.current || state.queue.length)) {
+  if (event.code === "Space" && !event.target.closest?.("button,a") && (state.current || state.queue.length || state.nextUp.length)) {
     event.preventDefault();
     togglePlay();
   }

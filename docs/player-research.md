@@ -33,3 +33,17 @@
 - 借鉴 Spotify 的作品链接和 AIMP 的定时停止。歌曲、专辑和公开歌单可以分享站内链接，打开后直接加载详情，音频由访客选择播放。定时停止提供倒计时和播完当前曲目两种用法。 [Spotify 分享](https://support.spotify.com/zm/article/share-from-spotify/) · [AIMP 定时停止](https://aimp.ru/?do=features&os=android)
 - 长列表可以按歌曲、歌手和专辑即时筛选。整张播放、加入队列和保存歌单仍以完整列表为单位，避免筛选后误把整张歌单截断。
 - 新功能无需访客账户。收藏、歌单、偏好和进度保存在当前浏览器。电台只向 NAS 请求精简的曲目信息。音频继续按现有播放来源设置加载，外网默认直连源站。
+
+## 任务对比与回归验证
+
+本轮查阅产品官方帮助、项目文档和发行说明，按三条实际路径对照。「回声」的验证使用桌面和移动视口、真实目录接口及可控音频测试数据。
+
+| 任务 | 产品做法与取舍 | 回声实现和验收点 |
+| --- | --- | --- |
+| 只记得一句歌词 | Spotify 把歌词匹配标在搜索结果中，要求查询至少三个词。Apple Music 支持在通用搜索中输入歌词，播放时也可从同步歌词跳到某一段。中文短句和英文空格分词差异较大，统一词数规则会让中文输入难以判断。 [Spotify 搜索](https://support.spotify.com/us/article/search/) · [Apple Music 搜索](https://support.apple.com/guide/music/search-for-music-mus896f20db7/mac) · [Apple Music 同步歌词](https://support.apple.com/en-euro/guide/iphone/iphb9bf483aa/ios) | 用独立的「歌词」类型告诉访客当前搜索范围。结果每首只显示一条匹配片段，点击才读取完整歌词。存在匹配时间戳时，可以直接从该处播放。验收覆盖中英文查询、同名不同版本及缺少时间戳的情况。 |
+| 听专辑时插一首歌 | Apple Music 把紧接当前曲目和追加队尾分开。Plex 明确第二次「下一首」插在第一次前面。AIMP 的优先队列覆盖播放顺序，原列表仍可查看和编辑。 [Apple Music 队列](https://support.apple.com/en-us/109336) · [Plex 队列](https://support.plex.tv/articles/202188298-play-queues/) · [AIMP 播放功能](https://aimp.ru/?do=features&os=android) | 「下一首」进入可重排的优先区，「加入队列」追加到主队列末尾。优先歌曲播完后回到原位置，提前播过的主队列歌曲在本轮顺序播放中跳过。 |
+| 从专辑中间开始听 | Feishin 的用户讨论显示，单曲播放按钮与整组接续的区别容易被忽略。Strawberry 让队列管理跟着播放列表标签，擅长维护多个列表，初次使用时也需要先理解队列属于哪个标签。 [Feishin 播放上下文讨论](https://github.com/jeffvli/feishin/discussions/2123) · [Strawberry 队列管理](https://wiki.strawberrymusicplayer.org/wiki/Differences_from_Clementine) | 专辑、歌手热门歌曲和歌单从点击的那一首顺序接续，搜索结果点播继续按单曲处理。现有的优先安排在切换主队列时保留。 |
+| 随机听大歌单 | foobar2000 区分逐首随机和洗牌。逐首随机容易在长列表中反复抽到熟悉曲目，洗牌则要维护一轮的播放状态。 [foobar2000 播放顺序](https://www.foobar2000.org/?page=FAQ) | 随机按完整队列记录本轮已播放 ID。跑完一轮后重开，轮次交界避免紧邻重复。记录与队列一起保存，覆盖超过旧历史窗口的队列。 |
+| 刷新后续听或误清队列 | Symfonium 提供恢复媒体队列的首页入口。Feishin 的发行记录分别处理了恢复时间戳、队列索引与弃用队列确认，可见这些是不同状态。Spotify 在 Web 清空队列时要求确认。 [Symfonium 发行说明](https://support.symfonium.app/t/version-16-0-0-beta-1/15504) · [Feishin 发行说明](https://github.com/jeffvli/feishin/releases) · [Spotify 队列](https://support.spotify.com/bb/article/play-queue/) | 首页点击「接着听」恢复曲目、秒数和主队列位置，包含在插播期间刷新。清空后可以撤销，继续编辑队列后以新安排为准。 |
+
+歌词索引和可播放曲目取决于源站。歌词检索只经过短文本元数据，完整歌词按需获取，播放沿用直连或局域网 NAS 的现有设置。

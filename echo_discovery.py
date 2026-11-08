@@ -2,6 +2,7 @@
 
 import re
 from functools import lru_cache
+from html import unescape
 from threading import BoundedSemaphore
 from time import monotonic
 
@@ -85,6 +86,20 @@ def similar_tracks(song_id, cache_window):
 
 @lru_cache(maxsize=160)
 def catalog_search(kind, keyword, page, cache_window):
+    if kind == "lyric":
+        payload = upstream("/api/cloudsearch/pc", {"s": keyword, "type": 1006, "limit": PAGE_SIZE, "offset": page * PAGE_SIZE})
+        result = as_dict(payload.get("result"))
+        songs = list(object_list(result.get("songs"), PAGE_SIZE))
+        matches = {}
+        for song in songs:
+            lines = song.get("lyrics")
+            if isinstance(lines, list):
+                line = next((line for line in lines if isinstance(line, str) and "<b>" in line), "")
+                if line:
+                    matches[str(song["id"])] = unescape(re.sub(r"<[^>]*>", "", line))[:180]
+        total = result.get("songCount")
+        return {"tracks": tracks_from(songs, PAGE_SIZE), "matches": matches,
+                "more": isinstance(total, int) and total > (page + 1) * PAGE_SIZE}
     type_id, key = SEARCH_TYPES[kind]
     payload = upstream("/api/search/get", {"s": keyword, "type": type_id, "limit": PAGE_SIZE, "offset": page * PAGE_SIZE})
     result = as_dict(payload.get("result"))
@@ -156,7 +171,7 @@ def catalog():
     kind = request.args.get("kind", "")
     keyword = request.args.get("q", "").strip()
     page = page_number()
-    if kind not in SEARCH_TYPES or not 1 <= len(keyword) <= 100 or page is None:
+    if (kind != "lyric" and kind not in SEARCH_TYPES) or not 1 <= len(keyword) <= 100 or page is None:
         return {"success": False, "message": "请提供有效的搜索类型、关键词和页码。"}, 400
     return metadata_result(catalog_search, kind, keyword, page)
 
