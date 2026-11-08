@@ -76,7 +76,7 @@ jobs:
           git -C frontend-git fetch --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
           test "$(git -C frontend-git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
           git -C frontend-git -c core.autocrlf=false archive FETCH_HEAD -- \
-            echo_discovery.py templates/index.html static/studio.css static/studio.js \
+            echo_discovery.py templates/index.html static/studio.css static/studio.js static/studio-tools.js \
             static/studio-icons.svg static/studio-mark.svg static/studio-vinyl.svg |
             tar -xf - -C image-context
           grep -Fq 'python3 main.py' image-context/entrypoint.sh
@@ -129,14 +129,14 @@ jobs:
             health=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
               --retry 12 --retry-delay 1 --retry-all-errors "$origin/health")
             jq -e '.success and .data.service == "running"' <<< "$health"
-            for path in 'similar?id=invalid' 'artist?id=invalid' 'catalog?kind=invalid' 'discover?category=invalid'; do
+            for path in 'similar?id=invalid' 'artist?id=invalid' 'catalog?kind=invalid' 'discover?category=invalid' 'tracks?ids=invalid'; do
               status=$(curl --silent --show-error --output /tmp/discovery.json --write-out '%{http_code}' "$origin/api/$path")
               test "$status" = 400
               jq -e '.success == false' /tmp/discovery.json
             done
             home=$(curl --fail --silent --show-error "$origin/")
             grep -Fq '/static/studio.js' <<< "$home"
-            for asset in studio.js studio.css studio-icons.svg studio-mark.svg studio-vinyl.svg; do
+            for asset in studio.js studio-tools.js studio.css studio-icons.svg studio-mark.svg studio-vinyl.svg; do
               curl --fail --silent --show-error --output /dev/null "$origin/static/$asset"
             done
             echo "$platform: server startup, health, frontend and FFmpeg checks passed"

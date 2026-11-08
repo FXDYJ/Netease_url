@@ -1,6 +1,7 @@
 """Extend the upstream Flask app with anonymous music catalog metadata."""
 
 import re
+import json
 from functools import lru_cache
 from html import unescape
 from threading import BoundedSemaphore
@@ -151,6 +152,25 @@ def metadata_result(loader, *args):
 def page_number():
     value = request.args.get("page", "0")
     return int(value) if re.fullmatch(r"[0-9]", value) else None
+
+
+@lru_cache(maxsize=48)
+def import_tracks(ids, cache_window):
+    numeric_ids = [int(song_id) for song_id in ids]
+    payload = upstream("/api/v3/song/detail", {
+        "c": json.dumps([{"id": song_id} for song_id in numeric_ids], separators=(",", ":")),
+        "ids": json.dumps(numeric_ids, separators=(",", ":")),
+    })
+    tracks = {track["id"]: track for track in tracks_from(payload.get("songs"), len(ids))}
+    return [tracks[song_id] for song_id in ids if song_id in tracks]
+
+
+@discovery.get("/api/tracks")
+def get_tracks():
+    ids = request.args.get("ids", "").split(",")
+    if len(ids) > 40 or any(not ID_PATTERN.fullmatch(song_id) for song_id in ids):
+        return {"success": False, "message": "每次可查询 1 至 40 个歌曲 ID。"}, 400
+    return metadata_result(import_tracks, tuple(dict.fromkeys(ids)))
 
 
 @discovery.get("/api/similar")

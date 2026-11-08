@@ -8,8 +8,9 @@
   <meta name="description" content="搜索、试听、解析和下载网易云音乐的自托管音乐工作台。">
   <title>回声 · 网易云音乐工作台</title>
   <link rel="icon" href="/static/studio-mark.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/studio.css?v=listening-1">
-  <script src="/static/studio.js?v=listening-1" defer></script>
+  <link rel="stylesheet" href="/static/studio.css?v=tools-1">
+  <script src="/static/studio-tools.js?v=tools-1" defer></script>
+  <script src="/static/studio.js?v=tools-1" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主内容</a>
@@ -32,6 +33,7 @@
         <a href="#favorites" data-mode="favorites"><svg><use href="/static/studio-icons.svg#heart"/></svg><span>收藏</span><small id="favorite-count">0</small></a>
         <a href="#library" data-mode="library"><svg><use href="/static/studio-icons.svg#folder"/></svg><span>音乐库</span></a>
         <a href="#history" data-mode="history"><svg><use href="/static/studio-icons.svg#clock"/></svg><span>最近播放</span></a>
+        <a href="#stats" data-mode="stats"><svg><use href="/static/studio-icons.svg#wave"/></svg><span>听歌统计</span></a>
         <a href="#settings" data-mode="settings"><svg><use href="/static/studio-icons.svg#settings"/></svg><span>设置</span></a>
       </nav>
       <button class="service-link" type="button" data-action="service">
@@ -53,6 +55,7 @@
         <details id="mobile-more"><summary>更多<svg aria-hidden="true"><use href="/static/studio-icons.svg#down"/></svg></summary>
           <div class="mobile-menu">
             <a href="#favorites" data-mode="favorites">我的收藏</a><a href="#history" data-mode="history">最近播放</a>
+            <a href="#stats" data-mode="stats">听歌统计</a>
             <a href="#song" data-mode="song">单曲解析</a><a href="#playlist" data-mode="playlist">歌单解析</a>
             <a href="#album" data-mode="album">专辑解析</a><a href="#download" data-mode="download">音乐下载</a>
             <a href="#settings" data-mode="settings">偏好设置</a>
@@ -104,6 +107,7 @@
             <div><h2 id="results-title" tabindex="-1">快速试听</h2><p id="results-note">从这几首开始，或搜索你想听的歌。</p></div>
             <div class="result-tools">
               <button type="button" class="quiet-button" id="play-all" data-action="play-all" title="从头播放此列表，保留已安排的下一首"><svg><use href="/static/studio-icons.svg#play"/></svg><span>播放全部</span></button>
+              <button type="button" class="icon-button" id="shuffle-list" data-action="shuffle-list" aria-label="随机播放此列表" title="随机播放此列表" hidden><svg><use href="/static/studio-icons.svg#shuffle"/></svg></button>
               <button type="button" class="quiet-button" id="add-all" data-action="add-all"><svg><use href="/static/studio-icons.svg#list-plus"/></svg><span>加入队列</span></button>
               <button type="button" class="icon-button" id="save-all" data-action="save-all" aria-label="保存曲目到歌单" title="保存曲目到歌单" hidden><svg><use href="/static/studio-icons.svg#folder"/></svg></button>
               <button type="button" class="quiet-button" id="batch-toggle" data-action="batch-toggle" aria-pressed="false" hidden>多选</button>
@@ -113,6 +117,7 @@
             <button type="button" class="quiet-button" data-action="batch-select">全选当前</button>
             <span id="batch-count" role="status">已选 0 首</span>
             <button type="button" class="quiet-button" data-action="batch-queue" disabled>加入队列</button>
+            <button type="button" class="quiet-button" data-action="batch-next" disabled>下一首播放</button>
             <button type="button" class="quiet-button" data-action="batch-save" disabled>存入歌单</button>
             <button type="button" class="quiet-button" data-action="batch-library" id="batch-library" disabled>收藏</button>
           </div>
@@ -121,6 +126,7 @@
             <label for="track-filter">列表内筛选</label>
             <input type="search" id="track-filter" placeholder="歌曲、歌手或专辑" autocomplete="off">
             <small id="track-filter-count" aria-live="polite"></small>
+            <label class="track-sort-label">排序<select id="track-sort"><option value="original">原顺序</option><option value="name">按歌名</option><option value="artists">按歌手</option><option value="album">按专辑</option></select></label>
           </div>
           <div id="result-content" aria-busy="false"></div>
         </section>
@@ -180,13 +186,22 @@
   <dialog id="queue-dialog" class="dialog" aria-labelledby="queue-title">
     <header><h2 id="queue-title">播放队列 <span id="queue-title-count"></span></h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
     <div class="dialog-body"><div id="queue-radio"></div>
-      <div class="queue-sections" id="queue-rows"></div><div class="dialog-actions">
+      <label class="dialog-search" id="queue-filter-label" hidden>查找队列<input id="queue-filter" type="search" placeholder="歌名、歌手或专辑" autocomplete="off"></label>
+      <div class="queue-sections" id="queue-rows"></div><p id="queue-filter-empty" class="result-message" hidden>没有匹配的队列歌曲。</p><div class="dialog-actions">
       <button type="button" class="quiet-button" data-action="queue-radio">心动电台</button>
       <button type="button" class="quiet-button" data-action="queue-timer" id="queue-timer">定时停止</button>
       <button type="button" class="quiet-button" data-action="save-queue" id="save-queue">保存为歌单</button>
       <button type="button" class="quiet-button" data-action="clear-queue" id="clear-queue">清空队列</button>
       <button type="button" class="quiet-button" data-action="restore-queue" id="restore-queue" hidden>撤销清空</button>
     </div></div>
+  </dialog>
+  <dialog id="track-import-dialog" class="dialog" aria-labelledby="track-import-title">
+    <header><h2 id="track-import-title">导入歌曲清单</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
+    <form id="track-import-form" class="dialog-body collection-form">
+      <label>歌曲链接或 ID<textarea id="track-import-input" rows="6" maxlength="42000" placeholder="每行一个网易云歌曲 ID 或完整单曲链接" required></textarea></label>
+      <p id="track-import-status" role="status">最多 300 首，自动去重并保留输入顺序。</p>
+      <div class="dialog-actions"><button type="submit" class="quiet-button" id="track-import-check">识别歌曲</button><button type="button" class="primary-button" id="track-import-save" data-action="save-imported-tracks" disabled>存入歌单</button></div>
+    </form>
   </dialog>
   <dialog id="collection-dialog" class="dialog" aria-labelledby="collection-title">
     <header><h2 id="collection-title">保存到歌单</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
@@ -218,13 +233,32 @@
         <button type="button" class="quiet-button" data-action="seed-radio" disabled>相似电台</button>
         <button type="button" class="quiet-button" data-action="find-artist" disabled>找歌手</button>
       </div>
+      <details class="practice-panel">
+        <summary>倍速与片段循环</summary>
+        <div class="practice-controls">
+          <label>倍速<select id="playback-rate"></select></label>
+          <button type="button" class="quiet-button" id="loop-a" data-action="loop-a" disabled>设为 A 点</button>
+          <button type="button" class="quiet-button" id="loop-b" data-action="loop-b" disabled>设为 B 点</button>
+          <button type="button" class="quiet-button" id="loop-clear" data-action="loop-clear" disabled>取消循环</button>
+        </div>
+        <p id="loop-status" role="status">在当前曲目上标记起止位置。</p>
+      </details>
     </section>
     <div class="lyrics-tools">
       <button type="button" class="quiet-button" id="dialog-translation" data-action="translate">译文</button>
       <button type="button" class="quiet-button" id="dialog-play-match" data-action="play-lyric-match" hidden>从这里播放</button>
       <button type="button" class="quiet-button" id="dialog-lrc" data-action="dialog-lrc">保存 LRC</button>
       <button type="button" class="quiet-button" id="dialog-lrc-translation" data-action="dialog-lrc-translation">保存译文</button>
-    </div><div id="mobile-lyrics-content" class="lyrics mobile-lyrics-content"></div></div>
+      <button type="button" class="quiet-button" id="lyric-copy" data-action="copy-lyric-text" hidden>复制文本</button>
+    </div>
+    <div class="lyric-search-bar" id="lyric-search-bar" hidden>
+      <label class="sr-only" for="lyric-query">歌词内查找</label><input type="search" id="lyric-query" placeholder="歌词内查找" maxlength="100">
+      <button type="button" class="icon-button" data-action="lyric-prev" aria-label="上一处匹配" disabled><svg><use href="/static/studio-icons.svg#up"/></svg></button>
+      <button type="button" class="icon-button" data-action="lyric-next" aria-label="下一处匹配" disabled><svg><use href="/static/studio-icons.svg#down"/></svg></button>
+      <small id="lyric-find-count" aria-live="polite"></small>
+    </div>
+    <p id="lyric-copy-status" role="status" hidden></p><textarea id="lyric-copy-value" rows="4" aria-label="可手动复制的歌词" readonly hidden></textarea>
+    <div id="mobile-lyrics-content" class="lyrics mobile-lyrics-content"></div></div>
   </dialog>
   <dialog id="share-dialog" class="dialog" aria-labelledby="share-title">
     <header><h2 id="share-title">分享页面</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>

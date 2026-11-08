@@ -23,6 +23,7 @@ const screens = {
   favorites: ["收藏", "我的收藏", "收藏保存在当前浏览器。"],
   library: ["音乐库", "我的音乐库", "整理自己的歌单，也可以收藏喜欢的歌手、专辑和公开歌单。"],
   history: ["最近播放", "最近播放", "在当前浏览器里接着听。"],
+  stats: ["听歌统计", "听歌统计", "看看最近听了多久，哪些歌反复出现在你的播放里。"],
   settings: ["设置", "偏好设置", "修改后立即生效。局域网地址与外网域名的偏好分别保存。"],
 };
 const searchTypes = { song: "歌曲", artist: "歌手", album: "专辑", playlist: "歌单", lyric: "歌词" };
@@ -108,6 +109,12 @@ const state = {
   batch: false,
   selected: new Set(),
   trackFilter: "",
+  trackSort: "original",
+  reordering: false,
+  rate: playbackRates.includes(saved.rate) ? saved.rate : "1",
+  dataSaver: saved.dataSaver === true,
+  statsEnabled: saved.statsEnabled !== false,
+  statsDays: 7,
   favorites: tracksFrom(saved.favorites),
   history: tracksFrom(saved.history),
   bookmarks: Array.isArray(saved.bookmarks) ? saved.bookmarks.map(bookmarkFrom).filter(Boolean).slice(0, 200) : [],
@@ -164,10 +171,11 @@ const state = {
 function persist() {
   try {
     const { favorites, history, bookmarks, queue, nextUp, playedEarly, shuffled, collections, resume, radioMode, discovery, hiddenTracks, queryHistory,
-      artistTaste, quality, order, translated, playbackRoute, downloadFormat } = state;
+      artistTaste, quality, order, translated, playbackRoute, downloadFormat, rate, dataSaver, statsEnabled } = state;
     localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, bookmarks, queue, nextUp, playedEarly: [...playedEarly],
       shuffled: [...shuffled], collections, resume, radioMode, discovery,
-      hiddenTracks, queryHistory, artistTaste: [...artistTaste], quality, order, translated, playbackRoute, downloadFormat, volume: audio.volume }));
+      hiddenTracks, queryHistory, artistTaste: [...artistTaste], quality, order, translated, playbackRoute, downloadFormat,
+      rate, dataSaver, statsEnabled, volume: audio.volume }));
     return true;
   } catch {
     return false;
@@ -308,6 +316,8 @@ function displayMode(mode, updateURL = true) {
     if (state.lookup?.target !== "download") state.lookup?.controller.abort();
     state.mode = mode;
     state.trackFilter = "";
+    state.trackSort = "original";
+    state.reordering = false;
     resetBatch();
     if (mode === "download") {
       $("download-format").value = effectiveDownloadFormat();
@@ -351,6 +361,7 @@ function openLocation() {
 function getView() {
   if (state.mode === "favorites") return { title: "已收藏的歌曲", note: state.favorites.length + " 首", tracks: state.favorites };
   if (state.mode === "history") return { title: "最近播放的歌曲", note: state.history.length + " 首", tracks: state.history };
+  if (state.mode === "stats") return { title: "本机播放记录" };
   if (state.mode === "settings") return { title: "播放与下载", note: lanAccess ? "当前通过局域网访问。" : "当前通过外网访问，播放使用源站直连。" };
   if (state.mode === "radio") return { title: "电台设置" };
   if (state.mode === "library") {
@@ -377,6 +388,8 @@ function settingsMarkup() {
       Object.entries(downloadFormats), state.downloadFormat),
     settingRow("quality", "默认音质", "用于播放、解析和下载，实际音质以源站返回为准。",
       Object.entries(qualities), state.quality),
+    settingRow("dataSaver", "低流量模式", "停用远程封面及推荐预取，歌词在打开播放面板或主动查看时加载。",
+      [["off", "关闭"], ["on", "开启"]], state.dataSaver ? "on" : "off"),
     settingRow("order", "播放顺序", "应用于当前播放队列。", orders, state.order),
     settingRow("radioMode", "心动电台", "可在队列结束后接播，或在顺序播放中穿插推荐。", Object.entries(radioModes), state.radioMode),
     settingRow("sleepMode", "定时停止", sleepDescription(), ["off", "15", "30", "60", "end"].map((value) =>
@@ -406,7 +419,7 @@ function bookmarkButton(id) {
 }
 
 function cover(track, size = 80) {
-  const url = mediaURL(track.pic, size);
+  const url = state.dataSaver ? "" : mediaURL(track.pic, size);
   return '<span class="track-cover" aria-hidden="true">' + icon("note") +
     (url ? '<img src="' + esc(url) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">' : "") + "</span>";
 }
@@ -429,6 +442,7 @@ function trackList(tracks, localCollection = false, lyricMatches = {}) {
     const active = state.current?.track.id === track.id;
     const playing = active && !audio.paused;
     const match = lyricMatches[track.id];
+    const reorder = localCollection && state.reordering;
     return '<div class="track-grid track-row' + (active ? " is-current" : "") + '" data-row="' + track.id + '">' +
       (state.batch ? '<input class="track-check" type="checkbox" data-select-track="' + track.id + '" aria-label="选择 ' + esc(track.name) + '"' +
         (state.selected.has(track.id) ? " checked" : "") + ">" :
@@ -437,11 +451,13 @@ function trackList(tracks, localCollection = false, lyricMatches = {}) {
         '<button type="button" class="lyric-match" data-action="song-lyrics" data-track="' + track.id +
         '" title="查看匹配歌词">' + icon("text") + '<span>' + esc(match) + "</span></button></div>" : trackMeta(track, "details")) +
       '<span class="track-album" title="' + esc(track.album) + '">' + esc(track.album || "—") + '</span><div class="track-actions">' +
+      (reorder ? button("collection-up", "up", "上移 " + track.name, track, { disabled: index === 0 }) +
+        button("collection-down", "down", "下移 " + track.name, track, { disabled: index === tracks.length - 1 }) :
       button("play", playing ? "pause" : "play", (playing ? "暂停 " : "播放 ") + track.name, track, { extra: "play-row" }) +
       button("enqueue", "list-plus", "加入队列 " + track.name, track) +
       button("favorite", "heart", (liked ? "取消收藏 " : "收藏 ") + track.name, track, { pressed: liked, extra: liked ? "liked" : "" }) +
       (localCollection ? button("collection-remove-track", "close", "从歌单移除 " + track.name, track) :
-        button("download", "download", "下载 " + track.name, track, { disabled: isDownloading(track.id) })) + "</div></div>";
+        button("download", "download", "下载 " + track.name, track, { disabled: isDownloading(track.id) }))) + "</div></div>";
   });
   return '<div class="track-list"><div class="track-grid track-header" aria-hidden="true"><span>' + (state.batch ? "选" : "#") +
     '</span><span>歌曲</span><span>专辑</span><span>操作</span></div>' +
@@ -490,14 +506,11 @@ function detailCard(view) {
 
 function renderResults() {
   const view = getView();
-  const terms = state.trackFilter.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const tracks = view.tracks || [];
-  const visibleTracks = terms.length ? tracks.filter((track) => {
-    const text = [track.name, track.artists, track.album].join(" ").toLowerCase();
-    return terms.every((term) => text.includes(term));
-  }) : tracks;
-  const showFilter = Boolean(view.tracks?.length > 6 || view.tracks?.length && terms.length);
+  const tracks = orderedTracks(view.tracks);
+  const visibleTracks = state.trackFilter.trim() ? tracks.filter((track) => trackMatches(track, state.trackFilter)) : tracks;
+  const showFilter = (tracks.length > 1 || tracks.length && state.trackFilter.trim()) && !state.reordering;
   $("track-filter-bar").hidden = !showFilter;
+  $("track-sort").value = state.trackSort;
   if ($("track-filter").value !== state.trackFilter) $("track-filter").value = state.trackFilter;
   $("track-filter-count").textContent = showFilter ? "显示 " + visibleTracks.length + " / " + view.tracks.length + " 首" : "";
   const filteredList = view.tracks?.length && !visibleTracks.length
@@ -506,10 +519,12 @@ function renderResults() {
   renderCatalogControls();
   $("results-title").textContent = view.title;
   $("results-note").textContent = view.note || "";
-  $("add-all").hidden = !view.tracks?.length || state.batch;
-  $("play-all").hidden = !view.tracks?.length || state.batch;
-  $("save-all").hidden = !view.tracks?.length || Boolean(view.localCollection) || state.batch;
-  $("batch-toggle").hidden = !view.tracks?.length;
+  const listTools = tracks.length && !state.batch && !state.reordering;
+  $("add-all").hidden = !listTools;
+  $("play-all").hidden = !listTools;
+  $("shuffle-list").hidden = !listTools || tracks.length < 2;
+  $("save-all").hidden = !listTools || Boolean(view.localCollection);
+  $("batch-toggle").hidden = !tracks.length || state.reordering;
   $("batch-toggle").textContent = state.batch ? "完成" : "多选";
   $("batch-toggle").setAttribute("aria-pressed", String(state.batch));
   $("batch-tools").hidden = !state.batch || !view.tracks?.length;
@@ -523,6 +538,8 @@ function renderResults() {
   content.setAttribute("aria-busy", String(view.kind === "loading"));
   if (state.mode === "settings") {
     content.innerHTML = settingsMarkup();
+  } else if (state.mode === "stats") {
+    content.innerHTML = statsMarkup();
   } else if (state.mode === "radio") {
     content.innerHTML = radioMarkup();
   } else if (state.mode === "library") {
@@ -620,12 +637,12 @@ function resetBatch() {
 }
 
 function selectedTracks() {
-  return (getView().tracks || []).filter((track) => state.selected.has(track.id));
+  return orderedTracks(getView().tracks).filter((track) => state.selected.has(track.id));
 }
 
 function syncBatch() {
   $("batch-count").textContent = "已选 " + state.selected.size + " 首";
-  for (const action of ["batch-queue", "batch-save", "batch-library"]) {
+  for (const action of ["batch-queue", "batch-next", "batch-save", "batch-library"]) {
     $("batch-tools").querySelector('[data-action="' + action + '"]').disabled = !state.selected.size;
   }
   $("batch-library").textContent = getView().localCollection ? "移出歌单" : state.mode === "favorites" ? "取消收藏" : "收藏";
@@ -660,6 +677,9 @@ function libraryMarkup(collection, visibleTracks, filteredList) {
   if (collection) {
     return '<div class="collection-tools"><button type="button" class="quiet-button" data-action="library-back">所有歌单</button>' +
       '<button type="button" class="quiet-button" data-action="rename-collection">重命名</button>' +
+      (collection.tracks.length > 1 ? '<button type="button" class="quiet-button" data-action="collection-reorder" aria-pressed="' + state.reordering +
+        '">' + (state.reordering ? "完成排序" : "手动排序") + '</button>' : '') +
+      (collection.tracks.length ? '<button type="button" class="quiet-button" data-action="export-track-list">导出歌曲链接</button>' : '') +
       '<button type="button" class="quiet-button" data-action="delete-collection">删除歌单</button></div>' +
       (collection.tracks.length ? (filteredList || trackList(visibleTracks, true)) :
         empty("list", "歌单还是空的", "在搜索、歌曲详情或播放队列里，可以把歌曲保存到这里。"));
@@ -670,7 +690,7 @@ function libraryMarkup(collection, visibleTracks, filteredList) {
     '</small></span></a><button type="button" class="icon-button" data-action="remove-bookmark" data-kind="' + item.kind +
     '" data-id="' + item.id + '" aria-label="取消收藏 ' + esc(item.name) + '">' + icon("close") + "</button></div>").join("") + "</section>" : "";
   return '<div class="collection-tools"><button type="button" class="quiet-button" data-action="new-collection">' +
-    icon("folder") + "新建歌单</button></div>" + (state.collections.length
+    icon("folder") + '新建歌单</button><button type="button" class="quiet-button" data-action="open-track-import">导入歌曲清单</button></div>' + (state.collections.length
       ? '<div class="collection-list">' + state.collections.map((item) =>
         '<button type="button" class="collection-link" data-action="open-collection" data-collection="' + item.id + '">' +
         cover(item.tracks[0] || {}) + '<span class="ellipsis"><strong>' + esc(item.name) + "</strong><small>" +
@@ -770,6 +790,8 @@ async function lookup(raw, mode = state.mode, { page = 0, section = "songs" } = 
   }
   const target = input.mode;
   state.trackFilter = "";
+  state.trackSort = "original";
+  state.reordering = false;
   resetBatch();
   state.queries[target] = raw;
   if (target !== state.mode) displayMode(target);
@@ -889,12 +911,19 @@ function enqueue(tracks, feedback = true) {
 }
 
 function playNext(track) {
-  if (!track || state.current?.track.id === track.id) return;
-  if (state.nextUp.length >= 50 && !state.nextUp.some((item) => item.id === track.id)) {
+  if (track) scheduleNext([track]);
+}
+
+function scheduleNext(tracks) {
+  const selection = uniqueTracks(tracks).filter((track) => track.id !== state.current?.track.id);
+  if (!selection.length) { toast("请选择当前曲目之外的歌曲。"); return; }
+  const ids = new Set(selection.map((track) => track.id));
+  const next = [...selection, ...state.nextUp.filter((item) => !ids.has(item.id))];
+  if (next.length > 50) {
     toast("优先播放已排满，请先整理队列。");
     return;
   }
-  state.nextUp = [track, ...state.nextUp.filter((item) => item.id !== track.id)];
+  state.nextUp = next;
   state.queueUndo = null;
   const advancing = Boolean(state.advance);
   if (state.advance) {
@@ -905,16 +934,16 @@ function playNext(track) {
   persist();
   renderQueue();
   if ($("queue-dialog").open) {
-    $("queue-rows").querySelector('[data-action="play"][data-track="' + track.id + '"]')?.focus();
+    $("queue-rows").querySelector('[data-action="play-queued-next"][data-track="' + selection[0].id + '"]')?.focus();
   }
   syncPlayer();
-  toast("下一首播放「" + track.name + "」");
+  toast(selection.length === 1 ? "下一首播放「" + selection[0].name + "」" : "已安排 " + selection.length + " 首优先播放");
   if (advancing) nextTrack();
 }
 
 function queueSection(title, list, type) {
   return '<section class="queue-section" data-list="' + type + '"><h3>' + title + '<small>' + list.length + ' 首</small></h3>' +
-    list.map((track, index) => '<div class="queue-row' + (state.current?.track.id === track.id ? " is-current" : "") + '">' +
+    list.map((track, index) => '<div data-queue-track="' + track.id + '" class="queue-row' + (state.current?.track.id === track.id ? " is-current" : "") + '">' +
       trackMeta(track, type === "next" ? "play-queued-next" : "play") + '<div>' +
       (type === "next" ? '<small class="queue-priority">' + (index === 0 ? "接下来" : "优先") + '</small>' :
         state.nextUp.some((item) => item.id === track.id) ? '<small class="queue-priority">已安排</small>' :
@@ -957,6 +986,19 @@ function renderQueue() {
     (state.nextUp.length ? queueSection("优先播放", state.nextUp, "next") : "") +
     (state.queue.length ? queueSection("主队列", state.queue, "main") : "") :
     empty("list", "播放队列为空", "点击歌曲旁的加入队列按钮，或加入整张歌单。");
+  $("queue-filter-label").hidden = !count;
+  filterQueueRows();
+}
+
+function filterQueueRows() {
+  const query = $("queue-filter").value.trim();
+  const tracks = new Map([...state.queue, ...state.nextUp].map((track) => [track.id, track]));
+  const rows = [...$("queue-rows").querySelectorAll("[data-queue-track]")];
+  for (const row of rows) row.hidden = Boolean(query && !trackMatches(tracks.get(row.dataset.queueTrack), query));
+  for (const section of $("queue-rows").querySelectorAll(".queue-section")) {
+    section.hidden = !section.querySelector("[data-queue-track]:not([hidden])");
+  }
+  $("queue-filter-empty").hidden = !query || !rows.length || rows.some((row) => !row.hidden);
 }
 
 function changeQueue(track, control) {
@@ -982,10 +1024,11 @@ function changeQueue(track, control) {
   persist();
   renderQueue();
   syncPlayer();
-  const controls = [...$("queue-rows").querySelectorAll('[data-list="' + section + '"] button')];
+  const controls = [...$("queue-rows").querySelectorAll('[data-list="' + section + '"] .queue-row:not([hidden]) button')];
   const preferred = controls.find((control) => control.dataset.track === track.id && control.dataset.action === action && !control.disabled);
   const fallback = controls.find((control) => control.dataset.track === track.id && control.classList.contains("track-meta"));
-  (preferred || fallback || controls[0] || $("queue-dialog").querySelector('[data-action="close"]')).focus();
+  (preferred || fallback || controls[0] || (!$("queue-filter-label").hidden ? $("queue-filter") :
+    $("queue-dialog").querySelector('[data-action="close"]'))).focus();
 }
 
 function toggleFavorite(track) {
@@ -1010,6 +1053,7 @@ function refreshTrackButtons() {
     const active = row.dataset.row === state.current?.track.id;
     row.classList.toggle("is-current", active);
     const play = row.querySelector('[data-action="play"]');
+    if (!play) continue;
     const title = row.querySelector(".track-meta strong").textContent;
     const playing = active && !audio.paused;
     setIcon(play, playing ? "pause" : "play");
@@ -1073,7 +1117,7 @@ function setNowStatus(text, kind = "") {
 }
 
 function applyCover(image, track, size, placeholder) {
-  const url = mediaURL(track.pic, size);
+  const url = state.dataSaver ? "" : mediaURL(track.pic, size);
   if (url) {
     if (image.getAttribute("src") !== url) image.src = url;
   } else image.removeAttribute("src");
@@ -1094,7 +1138,7 @@ function displayCurrent(track, recommendation) {
   applyCover($("mini-image"), track, 100);
   applyCover($("expanded-image"), track, 100);
   if ("mediaSession" in navigator && typeof MediaMetadata !== "undefined") {
-    const art = mediaURL(track.pic, 300);
+    const art = state.dataSaver ? "" : mediaURL(track.pic, 300);
     navigator.mediaSession.metadata = new MediaMetadata({ title: track.name, artist: track.artists, album: track.album, artwork: art ? [{ src: art }] : [] });
   }
 }
@@ -1128,6 +1172,33 @@ async function loadTrackLyrics(id, quality, signal) {
   return lyrics;
 }
 
+async function loadCurrentLyrics() {
+  const current = state.current;
+  if (!current || current.lyricsReady || current.lyricRequest) return;
+  const controller = new AbortController();
+  current.lyricRequest = controller;
+  current.lyricError = false;
+  renderLyrics();
+  try {
+    const data = await loadTrackLyrics(current.track.id, state.quality, controller.signal);
+    if (state.current !== current || controller.signal.aborted) return;
+    current.lyricsReady = true;
+    setLyrics(data.lyric, data.translation);
+  } catch {
+    if (!controller.signal.aborted) current.lyricError = true;
+  } finally {
+    current.lyricRequest = null;
+    if (state.current === current) renderLyrics();
+  }
+}
+
+function lyricsPlaceholder() {
+  if (!state.current || state.current.lyricsReady) return "";
+  if (state.current.lyricRequest) return "正在读取歌词…";
+  if (state.current.lyricError) return "歌词暂时无法加载。";
+  return state.dataSaver ? "低流量模式下可按需加载歌词。" : "";
+}
+
 async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = false, recommendation = null,
   queueCursor = track.id, navigation = true, advance = null, automatic = false, inserted = false } = {}) {
   if (state.advance && state.advance !== advance) {
@@ -1151,18 +1222,16 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
       state.radioStatus = "";
     }
     saveProgress(true);
+    state.current?.lyricRequest?.abort();
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
     state.current = { track, requested: quality, recommendation, queueCursor, navigation, inserted };
+    clearPracticeLoop();
     setLyrics("", "");
     displayCurrent(track, recommendation);
     renderResume();
-    loadTrackLyrics(track.id, quality, signal).then((data) => {
-      if (!signal.aborted && state.current?.track.id === track.id) setLyrics(data.lyric, data.translation);
-    }).catch(() => {
-      if (!signal.aborted && state.current?.track.id === track.id) $("lyrics").textContent = "歌词暂时无法加载。";
-    });
+    if (!state.dataSaver || ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true")) loadCurrentLyrics();
   }
   if (!recommendation && navigation && !keepCurrent && !automatic && !inserted) enqueue([track], false);
   if (!keepCurrent) {
@@ -1182,7 +1251,7 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
       : await resolveMedia(track.id, quality, signal);
     if (signal.aborted) return false;
     const stream = data.url;
-    state.current = { ...state.current, requested: quality, level: data.level, stream, route };
+    Object.assign(state.current, { requested: quality, level: data.level, stream, route });
     audio.src = stream;
     if (seek > 0) {
       audio.addEventListener("loadedmetadata", () => {
@@ -1285,6 +1354,7 @@ function loadSimilar(seed) {
 }
 
 function prefetchSimilar(seed) {
+  if (state.dataSaver) return;
   loadSimilar(seed).catch(() => { /* A failed prefetch can be retried when switching tracks. */ });
 }
 
@@ -1533,7 +1603,8 @@ function setLyrics(raw, translation) {
 function lyricMarkup(lines, raw, seekable = true) {
   if (!lines.length) {
     const text = raw.replace(/^\[[a-z]+:[^\]]*\]\s*/gim, "").trim();
-    return '<p class="empty-lyrics">' + (text ? esc(text).replaceAll("\n", "<br>") : "暂无歌词。") + "</p>";
+    return text ? '<div class="empty-lyrics">' + text.split(/\r?\n/).map((line) => '<p class="plain-lyric-line">' + esc(line) + '</p>').join("") + '</div>' :
+      '<p class="empty-lyrics">暂无歌词。</p>';
   }
   return lines.map((line, index) => {
     const body = esc(line.text) + (state.translated && line.translation ? "<small>" + esc(line.translation) + "</small>" : "");
@@ -1544,7 +1615,10 @@ function lyricMarkup(lines, raw, seekable = true) {
 
 function renderLyrics() {
   state.lyricIndex = -1;
-  $("lyrics").innerHTML = lyricMarkup(state.lyrics, state.lrc);
+  const placeholder = lyricsPlaceholder();
+  $("lyrics").innerHTML = placeholder ? '<p class="empty-lyrics">' + esc(placeholder) + '</p>' +
+    (!state.current?.lyricRequest ? '<button type="button" class="quiet-button" data-action="load-current-lyrics">加载歌词</button>' : '') :
+    lyricMarkup(state.lyrics, state.lrc);
   if ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true") renderLyricsDialog();
   $("translate-toggle").disabled = !state.lyrics.some((line) => line.translation);
   $("translate-toggle").setAttribute("aria-pressed", String(state.translated));
@@ -1571,7 +1645,7 @@ function highlightLyrics() {
     const line = panel.querySelector('[data-index="' + index + '"]');
     if (!line) continue;
     line.classList.add("active");
-    if (panel.clientHeight) {
+    if (panel.clientHeight && (panel !== $("mobile-lyrics-content") || !$("lyric-query").value.trim())) {
       panel.scrollTop += line.getBoundingClientRect().top - panel.getBoundingClientRect().top - panel.clientHeight * 0.35;
     }
   }
@@ -1593,6 +1667,7 @@ function syncTimeline() {
     $(prefix + "duration").textContent = timeText(duration);
   }
   syncPrevious();
+  if ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "true") renderPractice();
   highlightLyrics();
 }
 
@@ -1872,7 +1947,10 @@ function renderLyricsDialog() {
   const panel = $("mobile-lyrics-content");
   $("lyrics-dialog-title").textContent = follow ? "正在播放" : detail.name;
   $("expanded-player").hidden = !follow;
-  panel.innerHTML = lyricMarkup(detail.lines, detail.raw, follow);
+  const placeholder = follow ? lyricsPlaceholder() : "";
+  panel.innerHTML = placeholder ? '<p class="empty-lyrics">' + esc(placeholder) + '</p>' +
+    (!state.current?.lyricRequest ? '<button type="button" class="quiet-button" data-action="load-current-lyrics">加载歌词</button>' : '') :
+    lyricMarkup(detail.lines, detail.raw, follow);
   $("dialog-translation").hidden = !detail.translation;
   $("dialog-translation").setAttribute("aria-pressed", String(state.translated));
   $("dialog-lrc").hidden = !detail.raw;
@@ -1881,6 +1959,7 @@ function renderLyricsDialog() {
   if (follow) {
     state.lyricIndex = -1;
     highlightLyrics();
+    renderPractice();
   } else if (detail.match) {
     const normalize = (text) => text.normalize("NFKC").toLowerCase().replace(/[\p{P}\p{S}\s]/gu, "");
     const needle = normalize(detail.match);
@@ -1896,6 +1975,7 @@ function renderLyricsDialog() {
       $("dialog-play-match").hidden = !Number.isFinite(detail.matchedTime);
     }
   }
+  syncLyricTools(detail, (follow ? "current-" + (state.current?.track.id || "") : "inspect-" + (detail.track?.id || "")));
 }
 
 async function showSongLyrics(track) {
@@ -1904,7 +1984,7 @@ async function showSongLyrics(track) {
   const data = view.songData;
   const match = view.lyricMatches?.[track.id] || "";
   $("lyrics-dialog").dataset.follow = "false";
-  inspectedLyrics = { raw: "", translation: "", lines: [], name: track.name };
+  inspectedLyrics = { raw: "", translation: "", lines: [], name: track.name, track };
   showDialog("lyrics-dialog");
   renderLyricsDialog();
   let raw = data?.lyric;
@@ -2019,25 +2099,32 @@ function toggleBookmark(_, control) {
 }
 
 const actions = {
+  ...listeningActions,
   service: () => { showDialog("service-dialog"); loadServiceInfo(); },
   "open-settings": () => { $("service-dialog").close(); displayMode("settings"); $("main").focus(); },
   "refresh-service": () => { checkService(); loadServiceInfo(true); },
-  queue: () => { showDialog("queue-dialog"); renderQueue(); },
-  "expanded-queue": () => { $("lyrics-dialog").close(); showDialog("queue-dialog"); renderQueue(); },
+  queue: () => { $("queue-filter").value = ""; showDialog("queue-dialog"); renderQueue(); },
+  "expanded-queue": () => { $("lyrics-dialog").close(); actions.queue(); },
   "queue-radio": () => { $("queue-dialog").close(); displayMode("radio"); $("main").focus(); },
   "queue-timer": () => { $("queue-dialog").close(); displayMode("settings"); $("setting-sleepMode").focus(); },
   close: (_, button) => button.closest("dialog")?.close(),
   play: (track, control) => {
     const view = getView();
     if (track && control.closest(".track-row") && (view.collection || view.artist || view.localCollection) &&
-        (state.current?.track.id !== track.id || !audio.getAttribute("src"))) playList(view.tracks, track);
+        (state.current?.track.id !== track.id || !audio.getAttribute("src"))) playList(orderedTracks(view.tracks), track);
     else togglePlay(track);
   },
   enqueue: (track) => track && enqueue([track]),
   "play-next": playNext,
-  "add-all": () => enqueue(getView().tracks || []),
-  "play-all": () => playList(getView().tracks || []),
-  "save-all": () => editCollection(getView().tracks || []),
+  "add-all": () => enqueue(orderedTracks(getView().tracks)),
+  "play-all": () => playList(orderedTracks(getView().tracks)),
+  "shuffle-list": () => {
+    const tracks = orderedTracks(getView().tracks);
+    if (tracks.length < 2) return;
+    state.order = "shuffle";
+    playList(tracks, tracks[Math.floor(Math.random() * tracks.length)]);
+  },
+  "save-all": () => editCollection(orderedTracks(getView().tracks)),
   "batch-toggle": () => { state.batch ? resetBatch() : state.batch = true; renderResults(); },
   "batch-select": () => {
     const inputs = [...$("result-content").querySelectorAll("[data-select-track]")];
@@ -2050,6 +2137,7 @@ const actions = {
     syncBatch();
   },
   "batch-queue": () => enqueue(selectedTracks()),
+  "batch-next": () => scheduleNext(selectedTracks()),
   "batch-save": () => editCollection(selectedTracks()),
   "batch-library": batchLibrary,
   "export-library": exportLibrary,
@@ -2062,6 +2150,8 @@ const actions = {
   "open-collection": (_, control) => {
     state.collectionId = control.dataset.collection;
     state.trackFilter = "";
+    state.trackSort = "original";
+    state.reordering = false;
     resetBatch();
     renderResults();
     $("main").focus();
@@ -2069,10 +2159,22 @@ const actions = {
   "library-back": () => {
     state.collectionId = null;
     state.trackFilter = "";
+    state.trackSort = "original";
+    state.reordering = false;
     resetBatch();
     renderResults();
     $("main").focus();
   },
+  "collection-reorder": () => {
+    state.reordering = !state.reordering;
+    state.trackSort = "original";
+    state.trackFilter = "";
+    resetBatch();
+    renderResults();
+    $("result-content").querySelector('[data-action="collection-reorder"]')?.focus();
+  },
+  "collection-up": (track, control) => moveCollectionTrack(track, -1, control.dataset.action),
+  "collection-down": (track, control) => moveCollectionTrack(track, 1, control.dataset.action),
   "collection-remove-track": (track) => {
     const collection = getView().localCollection;
     if (!collection || !track) return;
@@ -2176,10 +2278,12 @@ const actions = {
     if ($("lyrics-dialog").open && $("lyrics-dialog").dataset.follow === "false") renderLyricsDialog();
   },
   "lyrics-export": () => exportLyrics(state.lrc, state.current?.track.name || "歌词"),
+  "load-current-lyrics": loadCurrentLyrics,
   "mobile-lyrics": () => {
     $("lyrics-dialog").dataset.follow = "true";
     showDialog("lyrics-dialog");
     renderLyricsDialog();
+    loadCurrentLyrics();
   },
   "song-lyrics": showSongLyrics,
   "play-lyric-match": () => {
@@ -2187,7 +2291,7 @@ const actions = {
     if (!track || !Number.isFinite(matchedTime)) return;
     $("lyrics-dialog").close();
     if (state.current?.track.id === track.id && Number.isFinite(audio.duration) && !audio.error) {
-      audio.currentTime = Math.min(matchedTime, Math.max(0, audio.duration - 1));
+      seekPlayback(Math.min(matchedTime, Math.max(0, audio.duration - 1)));
       playAudio();
     } else startTrack(track, { seek: matchedTime });
   },
@@ -2201,9 +2305,23 @@ const actions = {
     exportLyrics(follow ? state.translation : inspectedLyrics.translation, name + "（译文）");
   },
   "seek-line": (_, button) => {
-    if (audio.getAttribute("src") && Number.isFinite(audio.duration)) audio.currentTime = Math.min(Number(button.dataset.time), audio.duration);
+    if (audio.getAttribute("src")) seekPlayback(Number(button.dataset.time));
   },
 };
+
+function moveCollectionTrack(track, step, action) {
+  const tracks = getView().localCollection?.tracks;
+  if (!track || !tracks) return;
+  const index = tracks.findIndex((item) => item.id === track.id);
+  const target = index + step;
+  if (index < 0 || target < 0 || target >= tracks.length) return;
+  [tracks[index], tracks[target]] = [tracks[target], tracks[index]];
+  persist();
+  renderResults();
+  const controls = [...$("result-content").querySelectorAll('[data-row="' + track.id + '"] button')];
+  (controls.find((button) => button.dataset.action === action && !button.disabled) ||
+    controls.find((button) => !button.disabled && /collection-(?:up|down)/.test(button.dataset.action)))?.focus();
+}
 
 document.addEventListener("click", (event) => {
   const more = $("mobile-more");
@@ -2283,9 +2401,25 @@ const settingsActions = {
   sleepMode: setSleepMode,
   radioMode: setRadioMode,
   discovery: (value) => { state.discovery = value; persist(); },
+  dataSaver: (value) => {
+    state.dataSaver = value === "on";
+    const current = state.current;
+    if (current) displayCurrent(current.track, current.recommendation);
+    if (!state.dataSaver) loadCurrentLyrics();
+    else if (!$("lyrics-dialog").open) current?.lyricRequest?.abort();
+    persist();
+    renderResults();
+    $("setting-dataSaver").focus();
+  },
   translation: (value) => { state.translated = value === "on"; persist(); renderLyrics(); },
 };
 $("result-content").addEventListener("change", (event) => {
+  if (event.target.id === "stats-days") {
+    state.statsDays = Number(event.target.value);
+    renderResults();
+    $("stats-days").focus();
+    return;
+  }
   const selection = event.target.dataset.selectTrack;
   if (selection) {
     if (event.target.checked) state.selected.add(selection);
@@ -2302,6 +2436,11 @@ $("result-content").addEventListener("change", (event) => {
 $("collection-form").addEventListener("submit", saveCollection);
 $("import-library").addEventListener("change", importLibrary);
 $("track-filter").addEventListener("input", (event) => { state.trackFilter = event.target.value; renderResults(); });
+$("track-sort").addEventListener("change", (event) => {
+  state.trackSort = event.target.value;
+  renderResults();
+});
+$("queue-filter").addEventListener("input", filterQueueRows);
 $("collection-target").addEventListener("change", (event) => {
   const existing = Boolean(event.target.value);
   $("collection-name-label").hidden = existing;
@@ -2315,8 +2454,8 @@ const savedVolume = Number(saved.volume);
 audio.volume = Number.isFinite(savedVolume) ? Math.min(1, Math.max(0, savedVolume)) : 0.75;
 $("volume").value = audio.volume;
 $("volume").addEventListener("input", () => { audio.volume = Number($("volume").value); audio.muted = false; });
-$("seek").addEventListener("input", () => { audio.currentTime = Number($("seek").value); });
-$("expanded-seek").addEventListener("input", () => { audio.currentTime = Number($("expanded-seek").value); });
+$("seek").addEventListener("input", () => seekPlayback(Number($("seek").value)));
+$("expanded-seek").addEventListener("input", () => seekPlayback(Number($("expanded-seek").value)));
 
 audio.addEventListener("volumechange", () => { $("volume").value = audio.volume; persist(); syncPlayer(); });
 audio.addEventListener("playing", () => {
@@ -2354,13 +2493,15 @@ audio.addEventListener("waiting", () => { if (!audio.paused && audio.getAttribut
 audio.addEventListener("ended", () => {
   saveProgress(true);
   if (state.sleepMode === "end") { learnFromPlayback(true); stopForSleep(); }
-  else if (!checkSleepDeadline()) nextTrack(true);
+  else if (!checkSleepDeadline() && !enforcePracticeLoop(true)) nextTrack(true);
 });
 audio.addEventListener("timeupdate", () => {
   if (checkSleepDeadline()) return;
+  sampleListening();
+  if (enforcePracticeLoop()) return;
   saveProgress();
   const current = state.current;
-  if (state.radioMode !== "off" && current?.tracked && !current.prefetched && audio.currentTime >= 12) {
+  if (!state.dataSaver && state.radioMode !== "off" && current?.tracked && !current.prefetched && audio.currentTime >= 12) {
     current.prefetched = true;
     if (state.order !== "repeat-one" && !state.nextUp.length && shouldRecommend(queueStep().track)) {
       const [seed] = radioSeeds();
@@ -2390,7 +2531,7 @@ if ("mediaSession" in navigator) {
   for (const [action, handler] of Object.entries({
     play: () => togglePlay(), pause: () => audio.pause(), previoustrack: () => actions.previous(),
     nexttrack: () => nextTrack(), seekto: (details) => {
-      if (Number.isFinite(details.seekTime) && Number.isFinite(audio.duration)) audio.currentTime = Math.min(details.seekTime, audio.duration);
+      seekPlayback(details.seekTime);
     },
   })) {
     try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* This browser does not implement the action. */ }
@@ -2400,6 +2541,7 @@ if ("mediaSession" in navigator) {
 $("browse-categories").innerHTML = categories.map((category) =>
   '<button type="button" data-category="' + category + '" aria-pressed="false">' +
   (category === "charts" ? "排行榜" : category) + "</button>").join("");
+initListeningTools();
 openLocation();
 renderQueue();
 syncPlayer();
