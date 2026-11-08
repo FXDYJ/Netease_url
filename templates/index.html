@@ -22,12 +22,14 @@
       <nav class="nav">
         <p class="nav-label">发现音乐</p>
         <a href="#search" data-mode="search" aria-current="page"><svg><use href="/static/studio-icons.svg#search"/></svg><span>搜索</span></a>
+        <a href="#radio" data-mode="radio"><svg><use href="/static/studio-icons.svg#radio"/></svg><span>心动电台</span></a>
         <a href="#song" data-mode="song"><svg><use href="/static/studio-icons.svg#note"/></svg><span>单曲解析</span></a>
         <a href="#playlist" data-mode="playlist"><svg><use href="/static/studio-icons.svg#list"/></svg><span>歌单解析</span></a>
         <a href="#album" data-mode="album"><svg><use href="/static/studio-icons.svg#disc"/></svg><span>专辑解析</span></a>
         <a href="#download" data-mode="download"><svg><use href="/static/studio-icons.svg#download"/></svg><span>音乐下载</span></a>
         <p class="nav-label nav-gap">我的音乐</p>
         <a href="#favorites" data-mode="favorites"><svg><use href="/static/studio-icons.svg#heart"/></svg><span>收藏</span><small id="favorite-count">0</small></a>
+        <a href="#library" data-mode="library"><svg><use href="/static/studio-icons.svg#folder"/></svg><span>我的歌单</span></a>
         <a href="#history" data-mode="history"><svg><use href="/static/studio-icons.svg#clock"/></svg><span>最近播放</span></a>
         <a href="#settings" data-mode="settings"><svg><use href="/static/studio-icons.svg#settings"/></svg><span>设置</span></a>
       </nav>
@@ -45,9 +47,11 @@
         <button class="connection" type="button" data-action="service"><span class="status-dot" id="connection-dot"></span><span id="connection-text">正在连接</span></button>
       </header>
       <nav class="mobile-nav" aria-label="移动工作台导航">
-        <a href="#search" data-mode="search" aria-current="page">搜索</a><a href="#song" data-mode="song">单曲</a>
+        <a href="#search" data-mode="search" aria-current="page">搜索</a><a href="#radio" data-mode="radio">心动</a>
+        <a href="#library" data-mode="library">我的歌单</a><a href="#favorites" data-mode="favorites">收藏</a>
+        <a href="#song" data-mode="song">单曲</a>
         <a href="#playlist" data-mode="playlist">歌单</a><a href="#album" data-mode="album">专辑</a>
-        <a href="#download" data-mode="download">下载</a><a href="#favorites" data-mode="favorites">收藏</a>
+        <a href="#download" data-mode="download">下载</a>
         <a href="#history" data-mode="history">最近</a><a href="#settings" data-mode="settings">设置</a>
       </nav>
       <div class="content">
@@ -78,12 +82,25 @@
           </div>
         </section>
 
+        <section id="resume-card" class="resume-card" aria-label="接着听" hidden>
+          <div class="resume-meta"></div>
+          <button type="button" class="quiet-button" data-action="resume"><svg><use href="/static/studio-icons.svg#play"/></svg>接着听</button>
+        </section>
         <section class="results" aria-labelledby="results-title">
           <div class="section-header">
             <div><h2 id="results-title">快速试听</h2><p id="results-note">从这几首开始，或搜索你想听的歌。</p></div>
-            <button type="button" class="quiet-button" id="add-all" data-action="add-all"><svg><use href="/static/studio-icons.svg#list-plus"/></svg><span>加入队列</span></button>
+            <div class="result-tools">
+              <button type="button" class="quiet-button" id="play-all" data-action="play-all" title="用这些歌曲替换播放队列"><svg><use href="/static/studio-icons.svg#play"/></svg><span>播放全部</span></button>
+              <button type="button" class="quiet-button" id="add-all" data-action="add-all"><svg><use href="/static/studio-icons.svg#list-plus"/></svg><span>加入队列</span></button>
+              <button type="button" class="icon-button" id="save-all" data-action="save-all" aria-label="保存曲目到歌单" title="保存曲目到歌单" hidden><svg><use href="/static/studio-icons.svg#folder"/></svg></button>
+            </div>
           </div>
           <div id="result-message" class="result-message" role="status" hidden></div>
+          <div class="track-filter" id="track-filter-bar" hidden>
+            <label for="track-filter">列表内筛选</label>
+            <input type="search" id="track-filter" placeholder="歌曲、歌手或专辑" autocomplete="off">
+            <small id="track-filter-count" aria-live="polite"></small>
+          </div>
           <div id="result-content" aria-busy="false"></div>
         </section>
       </div>
@@ -94,6 +111,12 @@
       <div id="now-cover" class="now-cover empty-cover"><img id="now-image" src="/static/studio-vinyl.svg" alt="" hidden></div>
       <div class="now-caption"><div class="ellipsis"><h3 id="now-name">尚未播放</h3><p id="now-artist">从搜索结果中选一首歌</p></div><button type="button" class="icon-button" id="now-like" data-action="now-like" aria-label="收藏当前歌曲" title="收藏当前歌曲" disabled><svg><use href="/static/studio-icons.svg#heart"/></svg></button></div>
       <div class="now-status"><span class="status-dot" id="play-status-dot"></span><span id="play-status" role="status">等待选曲</span></div>
+      <p class="radio-reason" id="radio-reason" hidden></p>
+      <div class="now-tools">
+        <button type="button" class="quiet-button" data-action="seed-radio" disabled><svg><use href="/static/studio-icons.svg#radio"/></svg>相似电台</button>
+        <button type="button" class="icon-button" data-action="save-track" aria-label="保存当前歌曲到歌单" title="保存当前歌曲到歌单" disabled><svg><use href="/static/studio-icons.svg#folder"/></svg></button>
+        <button type="button" class="icon-button" data-action="hide-recommendation" aria-label="不再推荐当前歌曲" title="不再推荐当前歌曲" hidden><svg><use href="/static/studio-icons.svg#ban"/></svg></button>
+      </div>
       <div class="lyrics-head"><h3>歌词</h3><div><button type="button" class="icon-button small-icon" id="translate-toggle" data-action="translate" aria-label="显示译文" aria-pressed="true" title="显示或隐藏译文" disabled><svg><use href="/static/studio-icons.svg#translate"/></svg></button><button type="button" class="icon-button small-icon" id="lyrics-export" data-action="lyrics-export" aria-label="保存 LRC 歌词" title="保存 LRC 歌词" disabled><svg><use href="/static/studio-icons.svg#download"/></svg></button></div></div>
       <div class="lyrics" id="lyrics"><p class="empty-lyrics">歌词会随播放进度显示。</p></div>
     </aside>
@@ -134,7 +157,21 @@
   </dialog>
   <dialog id="queue-dialog" class="dialog" aria-labelledby="queue-title">
     <header><h2 id="queue-title">播放队列 <span id="queue-title-count"></span></h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
-    <div class="dialog-body"><div id="queue-rows"></div><div class="dialog-actions"><button type="button" class="quiet-button" data-action="clear-queue" id="clear-queue">清空队列</button></div></div>
+    <div class="dialog-body"><div id="queue-radio"></div><div id="queue-rows"></div><div class="dialog-actions">
+      <button type="button" class="quiet-button" data-action="queue-radio">心动电台</button>
+      <button type="button" class="quiet-button" data-action="queue-timer" id="queue-timer">定时停止</button>
+      <button type="button" class="quiet-button" data-action="save-queue" id="save-queue">保存为歌单</button>
+      <button type="button" class="quiet-button" data-action="clear-queue" id="clear-queue">清空队列</button>
+    </div></div>
+  </dialog>
+  <dialog id="collection-dialog" class="dialog" aria-labelledby="collection-title">
+    <header><h2 id="collection-title">保存到歌单</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
+    <form class="dialog-body collection-form" id="collection-form">
+      <label id="collection-target-label">歌单<select id="collection-target"></select></label>
+      <label id="collection-name-label">歌单名称<input id="collection-name" maxlength="48" autocomplete="off" placeholder="例如 周末随听"></label>
+      <p id="collection-hint" role="status"></p>
+      <div class="dialog-actions"><button class="primary-button" type="submit">保存</button></div>
+    </form>
   </dialog>
   <dialog id="lyrics-dialog" class="dialog" aria-labelledby="lyrics-dialog-title">
     <header><h2 id="lyrics-dialog-title">当前歌词</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
@@ -144,6 +181,14 @@
       <button type="button" class="quiet-button" id="dialog-lrc-translation" data-action="dialog-lrc-translation">保存译文</button>
     </div><div id="mobile-lyrics-content" class="lyrics mobile-lyrics-content"></div></div>
   </dialog>
+  <dialog id="share-dialog" class="dialog" aria-labelledby="share-title">
+    <header><h2 id="share-title">分享页面</h2><button type="button" class="icon-button" data-action="close" aria-label="关闭"><svg><use href="/static/studio-icons.svg#close"/></svg></button></header>
+    <div class="dialog-body collection-form"><label>页面链接<input id="share-url" type="url" readonly></label>
+      <p id="share-note" role="status">能访问当前站点的人可以打开这个链接。</p>
+      <div class="dialog-actions"><button type="button" class="primary-button" data-action="copy-share">复制链接</button></div>
+    </div>
+  </dialog>
+  <input type="file" id="import-library" accept=".json,application/json" hidden>
   <div class="toast" id="toast" role="status" hidden></div>
 </body>
 </html>

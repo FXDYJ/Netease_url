@@ -13,11 +13,13 @@ const qualities = {
 };
 const screens = {
   search: ["搜索", "想听什么？", "搜一首歌，或粘贴网易云音乐链接。", "歌曲名、歌手或音乐链接", "搜索"],
+  radio: ["心动电台", "顺着喜欢的歌听", "从正在听的歌出发，把熟悉的旋律和新发现混在一起。"],
   song: ["单曲解析", "解析单曲", "查看音源、实际音质和双语歌词。", "输入歌曲 ID 或网易云音乐链接", "解析"],
   playlist: ["歌单解析", "打开歌单", "查看曲目、逐首试听，或一次加入播放队列。", "输入歌单 ID 或链接", "解析"],
   album: ["专辑解析", "打开专辑", "按曲目顺序浏览专辑，保存想听的歌。", "输入专辑 ID 或链接", "解析"],
   download: ["音乐下载", "下载音乐", "选择音质和保存方式，再输入歌曲 ID 或链接。", "输入歌曲 ID 或网易云音乐链接", "下载"],
   favorites: ["收藏", "我的收藏", "收藏保存在当前浏览器。"],
+  library: ["我的歌单", "我的歌单", "把喜欢的歌曲整理成几张随时能播放的歌单。"],
   history: ["最近播放", "最近播放", "在当前浏览器里接着听。"],
   settings: ["设置", "偏好设置", "修改后立即生效。局域网地址与外网域名的偏好分别保存。"],
 };
@@ -31,6 +33,9 @@ const orders = [
   ["sequence", "顺序播放", "ordered"], ["repeat-all", "列表循环", "repeat"],
   ["repeat-one", "单曲循环", "repeat-one"], ["shuffle", "随机播放", "shuffle"],
 ];
+const radioModes = { off: "关闭", tail: "播完接续", mix: "穿插推荐" };
+const discoveryLevels = { familiar: ["偏熟悉", 3], balanced: ["均衡", 2], explore: ["多探索", 1] };
+const sleepModes = { off: "关闭", 15: "15 分钟后", 30: "30 分钟后", 60: "60 分钟后", end: "这首播完后" };
 const isId = (value) => /^[1-9]\d{0,19}$/.test(value);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
@@ -61,7 +66,7 @@ function songRecord(data) {
     name: String(data.name || "歌曲 " + id),
     artists: Array.isArray(artists) ? artists.map((item) => item?.name || item).join(" / ") : String(artists).replace(/\s*\/\s*/g, " / "),
     album: String(data.al_name || data.album?.name || data.al?.name || data.album || ""),
-    pic: String(data.pic || data.picUrl || data.al?.picUrl || ""),
+    pic: String(data.pic || data.picUrl || data.al?.picUrl || data.album?.picUrl || ""),
   };
 }
 
@@ -70,13 +75,39 @@ function tracksFrom(value) {
 }
 
 const saved = restore();
+const savedProgress = songRecord(saved.resume?.track);
 const state = {
   mode: "search",
   views: { search: { title: "快速试听", note: "从这几首开始，或搜索你想听的歌。", tracks: quickTracks } },
   queries: {},
+  trackFilter: "",
   favorites: tracksFrom(saved.favorites),
   history: tracksFrom(saved.history),
   queue: tracksFrom(saved.queue),
+  priority: Array.isArray(saved.priority) ? saved.priority.filter(isId).slice(0, 50) : [],
+  collections: (Array.isArray(saved.collections) ? saved.collections : [])
+    .filter((item) => typeof item?.name === "string" && typeof item.id === "string" && /^[a-z0-9-]{1,80}$/.test(item.id))
+    .map((item) => ({ id: item.id, name: item.name.slice(0, 48), tracks: tracksFrom(item.tracks) })),
+  collectionId: null,
+  collectionEdit: null,
+  resume: savedProgress && Number.isFinite(saved.resume.time)
+    ? { track: savedProgress, time: Math.max(0, saved.resume.time) } : null,
+  radioMode: Object.hasOwn(radioModes, saved.radioMode) ? saved.radioMode : "off",
+  discovery: Object.hasOwn(discoveryLevels, saved.discovery) ? saved.discovery : "balanced",
+  hiddenTracks: tracksFrom(saved.hiddenTracks).slice(0, 200),
+  artistTaste: new Map((Array.isArray(saved.artistTaste) ? saved.artistTaste : []).slice(0, 100)
+    .filter((pair) => Array.isArray(pair) && typeof pair[0] === "string" && Number.isFinite(pair[1]))),
+  trail: [],
+  trailIndex: -1,
+  radioAnchor: null,
+  radioStreak: 0,
+  radioPlayed: 0,
+  radioStatus: "",
+  advance: null,
+  sleepMode: "off",
+  sleepDeadline: 0,
+  sleepTimer: null,
+  sleepStopped: false,
   quality: Object.hasOwn(qualities, saved.quality) ? saved.quality : "standard",
   order: orders.some(([id]) => id === saved.order) ? saved.order : "sequence",
   translated: saved.translated !== false,
@@ -97,10 +128,13 @@ const state = {
 
 function persist() {
   try {
-    const { favorites, history, queue, quality, order, translated, playbackRoute, downloadFormat } = state;
-    localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, queue, quality, order, translated, playbackRoute, downloadFormat, volume: audio.volume }));
+    const { favorites, history, queue, priority, collections, resume, radioMode, discovery, hiddenTracks,
+      artistTaste, quality, order, translated, playbackRoute, downloadFormat } = state;
+    localStorage.setItem(libraryKey, JSON.stringify({ favorites, history, queue, priority, collections, resume, radioMode, discovery,
+      hiddenTracks, artistTaste: [...artistTaste], quality, order, translated, playbackRoute, downloadFormat, volume: audio.volume }));
+    return true;
   } catch {
-    // Private browsing or storage quotas may prevent saving preferences.
+    return false;
   }
 }
 
@@ -176,6 +210,9 @@ async function request(path, params = {}, { signal, timeout = 40000, binary = fa
 // Signed URLs and lyrics stay in memory, scoped to this page and quality.
 const mediaCache = new Map();
 const lyricCache = new Map();
+const similarCache = new Map();
+const similarRequests = new Map();
+const failedRecommendations = new Map();
 
 function remember(cache, key, data, lifetime) {
   cache.delete(key);
@@ -234,6 +271,7 @@ function displayMode(mode, updateURL = true) {
   if (state.mode !== mode) {
     if (state.lookup?.target !== "download") state.lookup?.controller.abort();
     state.mode = mode;
+    state.trackFilter = "";
     if (mode === "download") {
       $("download-format").value = effectiveDownloadFormat();
       updateDownloadNote();
@@ -262,10 +300,25 @@ function displayMode(mode, updateURL = true) {
   renderResults();
 }
 
+function openLocation() {
+  const [mode, query] = location.hash.slice(1).split("?", 2);
+  if (mode === "main") return;
+  displayMode(mode || "search", false);
+  const id = new URLSearchParams(query).get("id");
+  if (["song", "playlist", "album"].includes(mode) && isId(id || "")) lookup(id, mode);
+}
+
 function getView() {
   if (state.mode === "favorites") return { title: "已收藏的歌曲", note: state.favorites.length + " 首", tracks: state.favorites };
   if (state.mode === "history") return { title: "最近播放的歌曲", note: state.history.length + " 首", tracks: state.history };
   if (state.mode === "settings") return { title: "播放与下载", note: lanAccess ? "当前通过局域网访问。" : "当前通过外网访问，播放使用源站直连。" };
+  if (state.mode === "radio") return { title: "电台设置" };
+  if (state.mode === "library") {
+    const collection = state.collections.find((item) => item.id === state.collectionId);
+    return collection
+      ? { title: collection.name, note: collection.tracks.length + " 首", tracks: collection.tracks, localCollection: collection }
+      : { title: "歌单库", note: state.collections.length + " 张 · 保存在当前浏览器" };
+  }
   return state.views[state.mode] || { title: "结果", tracks: [] };
 }
 
@@ -285,6 +338,9 @@ function settingsMarkup() {
     settingRow("quality", "默认音质", "用于播放、解析和下载，实际音质以源站返回为准。",
       Object.entries(qualities), state.quality),
     settingRow("order", "播放顺序", "应用于当前播放队列。", orders, state.order),
+    settingRow("radioMode", "心动电台", "可在队列结束后接播，或在顺序播放中穿插推荐。", Object.entries(radioModes), state.radioMode),
+    settingRow("sleepMode", "定时停止", sleepDescription(), ["off", "15", "30", "60", "end"].map((value) =>
+      [value, sleepModes[value]]), state.sleepMode),
     settingRow("translation", "歌词译文", "在有译文时显示双语歌词。", [["on", "显示"], ["off", "隐藏"]],
       state.translated ? "on" : "off"),
   ];
@@ -293,7 +349,10 @@ function settingsMarkup() {
       "优先使用浏览器直连。设备无法播放源站时可改为通过 NAS。",
       [["direct", "浏览器直连"], ["nas", "通过 NAS"]], state.playbackRoute));
   }
-  return '<div class="settings-list">' + rows.join("") + "</div>";
+  return '<div class="settings-list">' + rows.join("") + '</div><section class="library-backup"><h3>音乐库备份</h3>' +
+    '<p>用 JSON 文件迁移收藏、本机歌单和不再推荐的曲目。重复导入会合并同一歌单。</p><div class="collection-tools">' +
+    '<button type="button" class="quiet-button" data-action="export-library">' + icon("download") + '导出备份</button>' +
+    '<button type="button" class="quiet-button" data-action="import-library">' + icon("up") + '导入备份</button></div></section>';
 }
 
 function favorite(track) {
@@ -318,7 +377,7 @@ function trackMeta(track, action) {
     "</strong><small>" + esc(track.artists || "未知歌手") + "</small></span></button>";
 }
 
-function trackList(tracks) {
+function trackList(tracks, localCollection = false) {
   const rows = tracks.map((track, index) => {
     const liked = favorite(track);
     const active = state.current?.track.id === track.id;
@@ -329,7 +388,8 @@ function trackList(tracks) {
       button("play", playing ? "pause" : "play", (playing ? "暂停 " : "播放 ") + track.name, track, { extra: "play-row" }) +
       button("enqueue", "list-plus", "加入队列 " + track.name, track) +
       button("favorite", "heart", (liked ? "取消收藏 " : "收藏 ") + track.name, track, { pressed: liked, extra: liked ? "liked" : "" }) +
-      button("download", "download", "下载 " + track.name, track, { disabled: isDownloading(track.id) }) + "</div></div>";
+      (localCollection ? button("collection-remove-track", "close", "从歌单移除 " + track.name, track) :
+        button("download", "download", "下载 " + track.name, track, { disabled: isDownloading(track.id) })) + "</div></div>";
   });
   return '<div class="track-list"><div class="track-grid track-header" aria-hidden="true"><span>#</span><span>歌曲</span><span>专辑</span><span>操作</span></div>' +
     rows.join("") + "</div>";
@@ -355,7 +415,11 @@ function detailCard(view) {
       '<button class="quiet-button" type="button" data-action="download" data-track="' + track.id + '"' + (isDownloading(track.id) ? " disabled" : "") + ">" + icon("download") + "下载音频</button>" +
       '<button class="quiet-button" type="button" data-action="song-lyrics" data-track="' + track.id + '">' + icon("text") + "查看歌词</button>" +
       (stream ? '<button class="quiet-button" type="button" data-action="copy-link">' + icon("link") + "复制直链</button>" : "") +
-      button("favorite", "heart", favorite(track) ? "取消收藏" : "收藏", track, { pressed: favorite(track) }) + "</div></div></article>";
+      button("favorite", "heart", favorite(track) ? "取消收藏" : "收藏", track, { pressed: favorite(track) }) +
+      button("play-next", "list-plus", "下一首播放 " + track.name, track) +
+      button("save-track", "folder", "保存歌曲到歌单", track) +
+      button("share-page", "share", "分享这首歌的页面") +
+      button("seed-radio", "radio", "从这首歌开启相似电台", track) + "</div></div></article>";
   }
   if (view.collection) {
     const data = view.collection;
@@ -363,16 +427,32 @@ function detailCard(view) {
     const meta = [data.creator || data.artist, date, data.trackCount == null ? "" : data.trackCount + " 首"].filter(Boolean).join(" · ");
     const description = data.description ? '<details><summary>查看简介</summary><p>' + esc(data.description) + "</p></details>" : "";
     return '<article class="detail">' + cover({ pic: data.coverImgUrl }, 240) + '<div class="detail-body"><h3>' + esc(data.name) +
-      "</h3><p>" + esc(meta) + "</p>" + description + "</div></article>";
+      "</h3><p>" + esc(meta) + "</p>" + description + '<div class="detail-actions"><button type="button" class="quiet-button" data-action="share-page">' +
+      icon("share") + "分享页面</button></div></div></article>";
   }
   return "";
 }
 
 function renderResults() {
   const view = getView();
+  const terms = state.trackFilter.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const tracks = view.tracks || [];
+  const visibleTracks = terms.length ? tracks.filter((track) => {
+    const text = [track.name, track.artists, track.album].join(" ").toLowerCase();
+    return terms.every((term) => text.includes(term));
+  }) : tracks;
+  const showFilter = Boolean(view.tracks?.length > 6 || view.tracks?.length && terms.length);
+  $("track-filter-bar").hidden = !showFilter;
+  if ($("track-filter").value !== state.trackFilter) $("track-filter").value = state.trackFilter;
+  $("track-filter-count").textContent = showFilter ? "显示 " + visibleTracks.length + " / " + view.tracks.length + " 首" : "";
+  const filteredList = view.tracks?.length && !visibleTracks.length
+    ? empty("search", "没有匹配的歌曲", "清除筛选，或试试歌名、歌手和专辑里的其他词。") : "";
+  renderResume();
   $("results-title").textContent = view.title;
   $("results-note").textContent = view.note || "";
   $("add-all").hidden = !view.tracks?.length;
+  $("play-all").hidden = !view.tracks?.length;
+  $("save-all").hidden = !view.tracks?.length || Boolean(view.localCollection);
   $("submit-search").disabled = view.kind === "loading";
   const message = $("result-message");
   message.hidden = !view.message;
@@ -382,6 +462,10 @@ function renderResults() {
   content.setAttribute("aria-busy", String(view.kind === "loading"));
   if (state.mode === "settings") {
     content.innerHTML = settingsMarkup();
+  } else if (state.mode === "radio") {
+    content.innerHTML = radioMarkup();
+  } else if (state.mode === "library") {
+    content.innerHTML = libraryMarkup(view.localCollection, visibleTracks, filteredList);
   } else if (view.kind === "loading") {
     content.innerHTML = '<div class="skeleton-row" aria-hidden="true"><span></span><span></span></div>'.repeat(3);
   } else if (view.kind === "error") {
@@ -393,7 +477,7 @@ function renderResults() {
       '<a class="quiet-button source-link" href="' + esc(view.url) +
       '" target="_blank" rel="noopener noreferrer">' + icon("arrow-up-right") + "打开源站音频</a>";
   } else if (view.song || view.collection || view.tracks?.length) {
-    content.innerHTML = detailCard(view) + (view.tracks?.length ? trackList(view.tracks) :
+    content.innerHTML = detailCard(view) + (view.tracks?.length ? (filteredList || trackList(visibleTracks)) :
       view.collection ? empty("list", "没有返回曲目", "这张歌单或专辑可能没有公开曲目。") : "");
   } else {
     const words = {
@@ -410,6 +494,112 @@ function renderResults() {
   $("favorite-count").textContent = state.favorites.length;
 }
 
+function renderResume() {
+  const card = $("resume-card");
+  card.hidden = state.mode !== "search" || !state.resume || Boolean(state.current);
+  if (card.hidden) return;
+  const { track, time } = state.resume;
+  card.querySelector(".resume-meta").innerHTML = cover(track) + '<span class="ellipsis"><strong>' + esc(track.name) +
+    "</strong><small>" + esc([track.artists, timeText(time)].filter(Boolean).join(" · ")) + "</small></span>";
+}
+
+function libraryMarkup(collection, visibleTracks, filteredList) {
+  if (collection) {
+    return '<div class="collection-tools"><button type="button" class="quiet-button" data-action="library-back">所有歌单</button>' +
+      '<button type="button" class="quiet-button" data-action="rename-collection">重命名</button>' +
+      '<button type="button" class="quiet-button" data-action="delete-collection">删除歌单</button></div>' +
+      (collection.tracks.length ? (filteredList || trackList(visibleTracks, true)) :
+        empty("list", "歌单还是空的", "在搜索、歌曲详情或播放队列里，可以把歌曲保存到这里。"));
+  }
+  return '<div class="collection-tools"><button type="button" class="quiet-button" data-action="new-collection">' +
+    icon("folder") + "新建歌单</button></div>" + (state.collections.length
+      ? '<div class="collection-list">' + state.collections.map((item) =>
+        '<button type="button" class="collection-link" data-action="open-collection" data-collection="' + item.id + '">' +
+        cover(item.tracks[0] || {}) + '<span class="ellipsis"><strong>' + esc(item.name) + "</strong><small>" +
+        item.tracks.length + " 首</small></span>" + icon("chevron-right") + "</button>").join("") + "</div>"
+      : empty("folder", "还没有自己的歌单", "新建一张空歌单，或把已有歌单和搜索结果保存下来。"));
+}
+
+function editCollection(tracks = [], operation = "save") {
+  const current = state.collections.find((item) => item.id === state.collectionId);
+  const form = $("collection-form");
+  const target = $("collection-target");
+  const name = $("collection-name");
+  const renaming = operation === "rename";
+  const deleting = operation === "delete";
+  state.collectionEdit = { tracks, operation, id: current?.id };
+  $("collection-title").textContent = { save: "保存到歌单", create: "新建歌单", rename: "重命名歌单", delete: "删除歌单" }[operation];
+  $("collection-target-label").hidden = operation !== "save" || !state.collections.length;
+  target.innerHTML = '<option value="">新建歌单</option>' + state.collections.map((item) =>
+    '<option value="' + item.id + '">' + esc(item.name) + "</option>").join("");
+  name.value = renaming ? current.name : "";
+  $("collection-name-label").hidden = deleting;
+  name.required = !deleting;
+  $("collection-hint").textContent = deleting ? "删除「" + current.name + "」？歌单中的歌曲可继续搜索和播放。" :
+    tracks.length ? "将保存 " + tracks.length + " 首歌曲，重复曲目会合并。" : "";
+  form.querySelector('[type="submit"]').textContent = deleting ? "删除歌单" : "保存";
+  showDialog("collection-dialog");
+  if (!deleting) (target.parentElement.hidden ? name : target).focus();
+}
+
+function saveCollection(event) {
+  event.preventDefault();
+  const edit = state.collectionEdit;
+  if (!edit) return;
+  const { tracks, operation, id } = edit;
+  const name = $("collection-name").value.trim();
+  if (operation === "delete") {
+    state.collections = state.collections.filter((item) => item.id !== id);
+    state.collectionId = null;
+  } else {
+    let collection = state.collections.find((item) => item.id === (operation === "rename" ? id : $("collection-target").value));
+    if (operation === "rename" || !collection) {
+      if (!name) { $("collection-hint").textContent = "请输入歌单名称。"; $("collection-name").focus(); return; }
+      if (collection) collection.name = name;
+      else {
+        collection = newCollection(name);
+        state.collections.push(collection);
+      }
+    }
+    const known = new Map(collection.tracks.map((track) => [track.id, track]));
+    for (const track of tracks) if (!known.has(track.id)) known.set(track.id, track);
+    collection.tracks = [...known.values()];
+    if (state.mode === "library") state.collectionId = collection.id;
+  }
+  $("collection-dialog").close();
+  state.collectionEdit = null;
+  const persisted = persist();
+  if (state.mode === "library") {
+    renderResults();
+    $("main").focus();
+  }
+  toast(!persisted ? "浏览器存储不可用，歌单变更仅在此页面有效。" : operation === "delete" ? "歌单已删除" : "歌单已保存");
+}
+
+function radioMarkup() {
+  const seed = state.radioAnchor || state.current?.track || state.favorites[0] || state.history[0];
+  const description = seed ? "沿着「" + seed.name + "」发现更多音乐" : "选一首喜欢的歌，电台就有了起点";
+  const heading = state.radioMode === "off" ? "电台已关闭" : state.radioStatus || radioModes[state.radioMode] + "已开启";
+  const resumeTrack = seed || quickTracks[0];
+  return '<div class="radio-feature"><div class="radio-dial" aria-hidden="true">' + icon("radio") + '</div><div class="radio-copy">' +
+    '<h3>' + esc(heading) + "</h3><p>" + esc(description) + '</p><div class="radio-actions">' +
+    (state.current
+      ? '<button type="button" class="primary-button" data-action="' + (state.radioMode === "off" ? "seed-radio" : "radio-next") +
+        '">' + icon("radio") + (state.radioMode === "off" ? "从当前歌曲开启" : "听一首推荐") + "</button>"
+      : '<button type="button" class="primary-button" data-action="seed-radio" data-track="' + resumeTrack.id + '">' + icon("play") +
+        (seed ? "从这首开始" : "试听并开启") + "</button>") +
+    '<a href="#search" class="quiet-button" data-mode="search">去搜索</a></div></div></div>' +
+    '<div class="settings-list radio-settings">' +
+    settingRow("radioMode", "推荐何时播放", "播完接续适合按专辑听。穿插推荐会在顺序播放中保留原队列的顺序。",
+      Object.entries(radioModes), state.radioMode) +
+    settingRow("discovery", "探索程度", "控制顺序播放中插播的频率和相似歌曲的排序。",
+      Object.entries(discoveryLevels).map(([id, [label]]) => [id, label]), state.discovery) +
+    '</div><p class="radio-privacy">收藏、听完和快速跳过会影响推荐排序。这些偏好仅保存在当前浏览器。</p>' +
+    (state.hiddenTracks.length ? '<details class="radio-hidden"><summary>不再推荐 · ' + state.hiddenTracks.length + " 首</summary>" +
+      state.hiddenTracks.map((track) => '<div class="queue-row">' + trackMeta(track, "details") + '<div>' +
+        button("unhide-recommendation", "up", "恢复推荐 " + track.name, track) + "</div></div>").join("") + "</details>" : "");
+}
+
 async function lookup(raw, mode = state.mode) {
   raw = raw.trim();
   if (!raw) { $("query").focus(); return; }
@@ -421,6 +611,7 @@ async function lookup(raw, mode = state.mode) {
     return;
   }
   const target = input.mode;
+  state.trackFilter = "";
   state.queries[target] = raw;
   if (target !== state.mode) displayMode(target);
   if (state.lookup) {
@@ -448,7 +639,8 @@ async function lookup(raw, mode = state.mode) {
       const collection = data[target];
       if (!collection?.name) throw new Error("没有找到这张" + (target === "album" ? "专辑" : "歌单") + "。");
       const tracks = tracksFrom(collection.tracks || collection.songs);
-      result = { title: target === "album" ? "专辑详情" : "歌单详情", note: "已读取 " + tracks.length + " 首曲目", collection, tracks };
+      result = { title: target === "album" ? "专辑详情" : "歌单详情", note: "已读取 " + tracks.length + " 首曲目",
+        collection, collectionId: input.id, tracks };
     }
     if (!signal.aborted) state.views[target] = result;
   } catch (error) {
@@ -482,8 +674,17 @@ async function resolveSong(id, quality, signal) {
 
 function findTrack(id) {
   const view = getView();
-  return [view.song, ...(view.tracks || []), state.current?.track, ...state.queue, ...state.favorites, ...state.history]
+  return [view.song, ...(view.tracks || []), state.current?.track, state.radioAnchor, ...state.queue, ...state.favorites,
+    ...state.history, ...state.hiddenTracks, ...quickTracks]
     .find((item) => item?.id === id);
+}
+
+function uniqueTracks(tracks) {
+  return [...new Map(tracks.map((track) => [track.id, track])).values()];
+}
+
+function newCollection(name) {
+  return { id: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10), name, tracks: [] };
 }
 
 function enqueue(tracks, feedback = true) {
@@ -501,14 +702,41 @@ function enqueue(tracks, feedback = true) {
   if (feedback) toast(count ? "已加入 " + count + " 首歌曲" : "所选歌曲已在队列中");
 }
 
+function playNext(track) {
+  if (!track || state.current?.track.id === track.id) return;
+  state.queue = state.queue.filter((item) => item.id !== track.id);
+  const cursor = state.queue.findIndex((item) => item.id === state.current?.queueCursor);
+  state.queue.splice(cursor + 1, 0, track);
+  state.priority = [track.id, ...state.priority.filter((id) => id !== track.id)].slice(0, 50);
+  persist();
+  renderQueue();
+  if ($("queue-dialog").open) {
+    $("queue-rows").querySelector('[data-action="play"][data-track="' + track.id + '"]')?.focus();
+  }
+  syncPlayer();
+  toast("下一首播放「" + track.name + "」");
+}
+
 function renderQueue() {
   $("queue-count").hidden = !state.queue.length;
   $("queue-count").textContent = state.queue.length;
   $("queue-title-count").textContent = state.queue.length ? "· " + state.queue.length + " 首" : "";
   $("clear-queue").disabled = !state.queue.length;
+  $("save-queue").disabled = !state.queue.length;
+  renderSleep();
   if (!$("queue-dialog").open) return;
+  const reason = state.current?.recommendation;
+  const current = state.current?.track;
+  $("queue-radio").innerHTML = (state.radioMode !== "off" || current)
+    ? '<div class="queue-radio-note">' + icon("radio") + '<div><strong>' +
+      esc(reason ? reason.reason : "心动电台 · " + radioModes[state.radioMode]) + "</strong><p>" +
+      esc(state.radioStatus || "手动安排的下一首先播放。") + "</p></div>" +
+      (current ? button("now-like", "heart", favorite(current) ? "取消收藏当前歌曲" : "收藏当前歌曲", null, { pressed: favorite(current) }) : "") +
+      (reason ? button("hide-recommendation", "ban", "不再推荐当前歌曲") : "") + "</div>" : "";
   $("queue-rows").innerHTML = state.queue.length ? state.queue.map((track, index) => (
     '<div class="queue-row' + (state.current?.track.id === track.id ? " is-current" : "") + '">' + trackMeta(track, "play") + '<div>' +
+    (state.priority.includes(track.id) ? '<small class="queue-priority">接下来</small>' :
+      button("play-next", "list-plus", "下一首播放 " + track.name, track, { disabled: state.current?.track.id === track.id })) +
     button("queue-up", "up", "上移 " + track.name, track, { disabled: index === 0 }) +
     button("queue-down", "down", "下移 " + track.name, track, { disabled: index === state.queue.length - 1 }) +
     button("queue-remove", "close", "移出队列 " + track.name, track) + "</div></div>"
@@ -524,6 +752,7 @@ function changeQueue(track, action) {
     if (destination < 0 || destination >= state.queue.length) return;
     [state.queue[index], state.queue[destination]] = [state.queue[destination], state.queue[index]];
   }
+  state.priority = state.priority.filter((id) => id !== track.id);
   persist();
   renderQueue();
   syncPlayer();
@@ -541,6 +770,11 @@ function toggleFavorite(track) {
   if (state.mode === "favorites") renderResults();
   else $("favorite-count").textContent = state.favorites.length;
   syncPlayer();
+  const queueLike = $("queue-radio").querySelector('[data-action="now-like"]');
+  if (queueLike && track.id === state.current?.track.id) {
+    queueLike.setAttribute("aria-pressed", String(!liked));
+    labelButton(queueLike, liked ? "收藏当前歌曲" : "取消收藏当前歌曲");
+  }
   toast(liked ? "已取消收藏" : "已收藏");
 }
 
@@ -570,6 +804,40 @@ function recordPlay(track) {
   if (state.mode === "history") renderResults();
 }
 
+function artistKeys(track) {
+  return track.artists.split(" / ").map((name) => name.trim().toLowerCase()).filter(Boolean);
+}
+
+function learnFromPlayback(ended) {
+  const current = state.current;
+  if (!current?.tracked || current.rated) return;
+  const ranges = audio.played;
+  let seconds = 0;
+  for (let index = 0; index < ranges.length; index++) seconds += ranges.end(index) - ranges.start(index);
+  const duration = audio.duration || Infinity;
+  const value = (ended && seconds >= Math.min(20, duration * 0.6)) ? 2 :
+    seconds >= Math.min(60, duration * 0.6) ? 1 : !ended && seconds < Math.min(15, duration * 0.35) ? -1 : 0;
+  if (!value) return;
+  current.rated = true;
+  for (const key of artistKeys(current.track)) {
+    const score = state.artistTaste.get(key) || 0;
+    state.artistTaste.delete(key);
+    state.artistTaste.set(key, Math.max(-8, Math.min(12, score + value)));
+  }
+  while (state.artistTaste.size > 100) state.artistTaste.delete(state.artistTaste.keys().next().value);
+  persist();
+}
+
+let lastProgressWrite = 0;
+function saveProgress(force = false) {
+  const current = state.current;
+  if (!current?.tracked || !Number.isFinite(audio.currentTime)) return;
+  if (!force && Date.now() - lastProgressWrite < 5000) return;
+  lastProgressWrite = Date.now();
+  state.resume = { track: current.track, time: audio.ended ? 0 : audio.currentTime };
+  persist();
+}
+
 function setNowStatus(text, kind = "") {
   $("play-status").textContent = text;
   $("play-status-dot").dataset.state = kind;
@@ -584,11 +852,13 @@ function applyCover(image, track, size, placeholder) {
   if (placeholder) placeholder.classList.toggle("empty-cover", !url);
 }
 
-function displayCurrent(track) {
+function displayCurrent(track, recommendation) {
   $("now-name").textContent = track.name;
   $("now-artist").textContent = track.artists || "未知歌手";
   $("mini-name").textContent = track.name;
-  $("mini-artist").textContent = track.artists || "未知歌手";
+  $("mini-artist").textContent = [recommendation ? "心动推荐" : "", track.artists || "未知歌手"].filter(Boolean).join(" · ");
+  $("radio-reason").hidden = !recommendation;
+  $("radio-reason").textContent = recommendation?.reason || "";
   applyCover($("now-image"), track, 520, $("now-cover"));
   applyCover($("mini-image"), track, 100);
   if ("mediaSession" in navigator && typeof MediaMetadata !== "undefined") {
@@ -597,16 +867,18 @@ function displayCurrent(track) {
   }
 }
 
-async function playAudio() {
+async function playAudio(quiet = false) {
   const source = audio.src;
   try {
     await audio.play();
+    return true;
   } catch (error) {
     if (error.name !== "AbortError" && audio.src === source) {
       const message = error.name === "NotAllowedError" ? "点击播放按钮继续试听。" : playbackError();
       setNowStatus(message, "error");
-      toast(message);
+      if (!quiet || error.name === "NotAllowedError") toast(message);
     }
+    return error.name === "NotAllowedError";
   }
 }
 
@@ -624,52 +896,76 @@ async function loadTrackLyrics(id, quality, signal) {
   return lyrics;
 }
 
-async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = false } = {}) {
+async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = false, recommendation = null,
+  queueCursor = track.id, navigation = true, advance = null, automatic = false } = {}) {
+  if (state.advance && state.advance !== advance) {
+    state.advance.abort();
+    state.advance = null;
+    state.radioStatus = "";
+  }
   state.playRequest?.abort();
   const controller = new AbortController();
   state.playRequest = controller;
   const quality = state.quality;
   const route = state.playbackRoute;
   const signal = controller.signal;
+  const abortAdvance = () => controller.abort();
+  advance?.signal.addEventListener("abort", abortAdvance, { once: true });
   if (!keepCurrent) {
+    if (!automatic && navigation) {
+      learnFromPlayback(false);
+      state.radioAnchor = track;
+      state.radioStreak = 1;
+      state.radioStatus = "";
+    }
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
-    state.current = { track, requested: quality };
+    state.current = { track, requested: quality, recommendation, queueCursor, navigation };
     setLyrics("", "");
-    displayCurrent(track);
+    displayCurrent(track, recommendation);
+    renderResume();
     loadTrackLyrics(track.id, quality, signal).then((data) => {
       if (!signal.aborted && state.current?.track.id === track.id) setLyrics(data.lyric, data.translation);
     }).catch(() => {
       if (!signal.aborted && state.current?.track.id === track.id) $("lyrics").textContent = "歌词暂时无法加载。";
     });
   }
-  enqueue([track], false);
+  if (!recommendation && navigation && !keepCurrent && !automatic) enqueue([track], false);
+  if (!keepCurrent && state.priority.includes(track.id)) {
+    state.priority = state.priority.filter((id) => id !== track.id);
+    persist();
+  }
+  renderQueue();
   setNowStatus("正在获取音源…", "loading");
+  syncPlayer();
   try {
     const data = route === "nas"
       ? { url: apiURL("/download", { id: track.id, quality, format: "file" }).href }
       : await resolveMedia(track.id, quality, signal);
-    if (signal.aborted) return;
+    if (signal.aborted) return false;
     const stream = data.url;
-    state.current = { track, requested: quality, level: data.level, stream, route };
+    state.current = { ...state.current, requested: quality, level: data.level, stream, route };
     audio.src = stream;
     if (seek > 0) {
       audio.addEventListener("loadedmetadata", () => {
-        if (audio.src === stream && Number.isFinite(audio.duration)) audio.currentTime = Math.min(seek, audio.duration);
+        if (audio.src === stream && Number.isFinite(audio.duration)) audio.currentTime = Math.min(seek, Math.max(0, audio.duration - 1));
       }, { once: true });
     }
     setNowStatus("可试听" + qualitySuffix(), "ok");
-    if (autoPlay) await playAudio();
+    return autoPlay ? await playAudio(Boolean(recommendation && advance)) : true;
   } catch (error) {
     if (!signal.aborted) {
       const message = error.message || "暂时无法读取音源。";
       setNowStatus(keepCurrent ? "切换失败，保留原音源" + qualitySuffix() : message, "error");
-      toast(message);
+      if (!recommendation) toast(message);
     }
+    return false;
   } finally {
+    advance?.signal.removeEventListener("abort", abortAdvance);
     if (state.playRequest === controller) {
       state.playRequest = null;
+      updateRadioView();
       syncPlayer();
     }
   }
@@ -678,7 +974,10 @@ async function startTrack(track, { autoPlay = true, seek = 0, keepCurrent = fals
 function togglePlay(track = state.current?.track || state.queue[0]) {
   if (!track) return;
   if (state.current?.track.id !== track.id || !audio.getAttribute("src") || audio.error) {
-    if (!state.playRequest || state.current?.track.id !== track.id) startTrack(track);
+    if (!state.playRequest || state.current?.track.id !== track.id) {
+      const current = state.current?.track.id === track.id ? state.current : null;
+      startTrack(track, current?.recommendation ? { recommendation: current.recommendation, queueCursor: current.queueCursor } : {});
+    }
   } else if (audio.paused) {
     playAudio();
   } else {
@@ -686,23 +985,208 @@ function togglePlay(track = state.current?.track || state.queue[0]) {
   }
 }
 
-function changeTrack(direction, ended = false) {
-  if (!state.queue.length) return;
-  if (ended && state.order === "repeat-one" && audio.getAttribute("src")) {
+function updateRadioView() {
+  if (state.mode !== "radio") return;
+  const focused = document.activeElement;
+  if ($("result-content").contains(focused) && focused.dataset.setting) {
+    const feature = $("result-content").querySelector(".radio-feature");
+    const markup = document.createElement("template");
+    markup.innerHTML = radioMarkup();
+    feature?.replaceWith(markup.content.firstElementChild);
+  } else {
+    renderResults();
+    if (focused?.dataset.action === "radio-next" || focused?.dataset.action === "seed-radio") {
+      $("result-content").querySelector(".radio-actions button")?.focus();
+    }
+  }
+}
+
+function setRadioMode(value) {
+  if (!Object.hasOwn(radioModes, value)) return;
+  state.advance?.abort();
+  state.advance = null;
+  state.radioMode = value;
+  state.radioStatus = "";
+  state.radioStreak = 0;
+  const setting = $("setting-radioMode");
+  if (setting) setting.value = value;
+  persist();
+  updateRadioView();
+  renderQueue();
+  syncPlayer();
+}
+
+function seedRadio(track) {
+  const seed = track || state.current?.track;
+  if (!seed) return;
+  state.radioAnchor = seed;
+  setRadioMode("mix");
+  if (state.current?.track.id !== seed.id || !audio.getAttribute("src")) startTrack(seed);
+  else {
+    prefetchSimilar(seed);
+    if (audio.paused) playAudio();
+  }
+  toast("已开启相似电台");
+}
+
+function loadSimilar(seed) {
+  const cached = recall(similarCache, seed.id);
+  if (cached) return Promise.resolve(cached);
+  if (!similarRequests.has(seed.id)) {
+    const loading = request("/api/similar", { id: seed.id }, { timeout: 9000 })
+      .then((data) => {
+        const tracks = tracksFrom(data);
+        remember(similarCache, seed.id, tracks, 300000);
+        return tracks;
+      }).finally(() => similarRequests.delete(seed.id));
+    similarRequests.set(seed.id, loading);
+  }
+  return similarRequests.get(seed.id);
+}
+
+function prefetchSimilar(seed) {
+  loadSimilar(seed).catch(() => { /* A failed prefetch can be retried when switching tracks. */ });
+}
+
+function queueNext() {
+  const priority = state.queue.find((track) => track.id === state.priority[0]);
+  if (priority) return priority;
+  const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
+  if (state.order === "shuffle" && state.queue.length > 1) {
+    const previous = state.trail.slice(0, state.trailIndex + 1).reverse().map(({ track }) => track.id);
+    const choices = state.queue.filter((track) => track.id !== state.current?.track.id);
+    const fresh = choices.filter((track) => !previous.includes(track.id));
+    return fresh.length ? fresh[Math.floor(Math.random() * fresh.length)] :
+      choices.reduce((oldest, track) => previous.indexOf(track.id) > previous.indexOf(oldest.id) ? track : oldest);
+  }
+  return state.queue[cursor + 1] || (state.order === "repeat-all" ? state.queue[0] : null);
+}
+
+function shouldRecommend(next) {
+  return state.radioMode !== "off" && (!next || (state.radioMode === "mix" && state.order === "sequence" &&
+    state.radioStreak >= discoveryLevels[state.discovery][1]));
+}
+
+function radioSeeds() {
+  const anchor = state.radioAnchor || state.current?.track;
+  const tasteSeed = state.favorites.find((track) => !state.hiddenTracks.some((item) => item.id === track.id)) ||
+    state.history.find((track) => artistKeys(track).some((artist) => state.artistTaste.get(artist) > 1));
+  const first = state.radioPlayed % 3 === 2 && tasteSeed ? tasteSeed : anchor;
+  return uniqueTracks([first, anchor, state.current?.track, tasteSeed].filter(Boolean)).slice(0, 2);
+}
+
+async function recommendations(next, signal) {
+  const currentId = state.current?.track.id;
+  const seen = new Set(state.trail.slice(-24).map(({ track }) => track.id));
+  const blocked = new Set(state.hiddenTracks.map((track) => track.id));
+  const queued = new Set(state.queue.map((track) => track.id));
+  const recent = new Set(state.history.slice(0, 8).map((track) => track.id));
+  const recentArtists = state.history.slice(0, 3).flatMap(artistKeys);
+  const favoriteArtists = new Set(state.favorites.slice(0, 25).flatMap(artistKeys));
+  const eligible = (track) => track.id !== currentId && !seen.has(track.id) && !blocked.has(track.id) &&
+    !recall(failedRecommendations, track.id + ":" + state.quality) && (!queued.has(track.id) || track.id === next?.id);
+  const score = (track) => {
+    const artists = artistKeys(track);
+    const taste = artists.reduce((total, name) => total + (state.artistTaste.get(name) || 0) + (favoriteArtists.has(name) ? 3 : 0), 0);
+    const loved = favorite(track) ? 1 : 0;
+    const repeats = recentArtists.filter((name) => artists.includes(name)).length;
+    if (state.discovery === "explore") return taste * .3 - repeats * 5 - loved * 5 - (recent.has(track.id) ? 12 : 0);
+    return taste * .55 + loved * (state.discovery === "familiar" ? 8 : 2) - repeats * 2 - (recent.has(track.id) ? 5 : 0);
+  };
+  const select = (tracks, reason) => uniqueTracks(tracks).filter(eligible).sort((a, b) => score(b) - score(a))
+    .map((track) => ({ track, reason: (queued.has(track.id) ? "队列内 · " : "心动推荐 · ") + reason }));
+  const seeds = radioSeeds();
+  for (const seed of seeds) {
+    if (signal.aborted) return [];
+    try {
+      const tracks = await loadSimilar(seed);
+      const choices = select(tracks, "与「" + seed.name + "」相似");
+      if (choices.length) return choices;
+    } catch { /* Try a second seed or artist search. */ }
+  }
+  if (signal.aborted) return [];
+  const seed = seeds[0];
+  const artist = seed?.artists.split(" / ")[0];
+  if (artist) {
+    try {
+      const found = tracksFrom(await request("/search", { keyword: artist, limit: 12 }, { signal, timeout: 6000 }));
+      const choices = select(found.filter((track) => artistKeys(track).includes(artist.toLowerCase())), "同歌手 · " + artist);
+      if (choices.length) return choices;
+    } catch { /* Saved favorites remain available if discovery is temporarily unreachable. */ }
+  }
+  return signal.aborted ? [] : select(state.favorites, "来自你的收藏");
+}
+
+function previousTrack() {
+  if (audio.currentTime >= 3) { audio.currentTime = 0; return; }
+  if (state.trailIndex > 0) {
+    const { track, recommendation, queueCursor } = state.trail[--state.trailIndex];
+    startTrack(track, { recommendation, queueCursor, navigation: false });
+    return;
+  }
+  const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
+  const previous = state.queue[cursor > 0 ? cursor - 1 : state.order === "repeat-all" ? state.queue.length - 1 : -1];
+  if (previous) startTrack(previous, { automatic: true });
+}
+
+async function nextTrack(ended = false, forceRadio = false) {
+  if (state.advance) return;
+  learnFromPlayback(ended);
+  if (!forceRadio && ended && state.order === "repeat-one" && audio.getAttribute("src")) {
     audio.currentTime = 0;
     playAudio();
     return;
   }
-  const index = state.queue.findIndex((track) => track.id === state.current?.track.id);
-  let next = index < 0 ? 0 : index + direction;
-  if (state.order === "shuffle" && direction > 0 && state.queue.length > 1) {
-    const possible = state.queue.filter((track) => track.id !== state.current?.track.id);
-    startTrack(possible[Math.floor(Math.random() * possible.length)]);
+  const next = queueNext();
+  const priority = next && state.priority.includes(next.id);
+  if (!priority && !forceRadio && state.trailIndex + 1 < state.trail.length) {
+    const { track, recommendation, queueCursor } = state.trail[++state.trailIndex];
+    startTrack(track, { recommendation, queueCursor, navigation: false });
     return;
   }
-  if (state.order === "repeat-all") next = (next + state.queue.length) % state.queue.length;
-  if (state.queue[next]) startTrack(state.queue[next]);
-  else if (ended) setNowStatus("已播完队列" + qualitySuffix(), "ok");
+  if (!priority && (forceRadio || shouldRecommend(next))) {
+    const advance = new AbortController();
+    state.advance = advance;
+    state.radioStatus = "正在挑选推荐…";
+    const queueCursor = state.current?.queueCursor || null;
+    updateRadioView();
+    renderQueue();
+    syncPlayer();
+    let found = false;
+    try {
+      const choices = await recommendations(next, advance.signal);
+      for (const choice of choices.slice(0, 3)) {
+        if (advance.signal.aborted) break;
+        const quality = state.quality;
+        found = await startTrack(choice.track, { recommendation: choice,
+          queueCursor: choice.track.id === next?.id ? choice.track.id : queueCursor, advance, automatic: true });
+        if (found) {
+          state.radioStreak = 0;
+          state.radioPlayed++;
+          break;
+        }
+        if (!advance.signal.aborted) remember(failedRecommendations, choice.track.id + ":" + quality, true, 120000);
+      }
+    } finally {
+      if (state.advance === advance) {
+        state.advance = null;
+        state.radioStatus = found ? "" : "暂时没有可用的推荐歌曲";
+        updateRadioView();
+        renderQueue();
+        syncPlayer();
+      }
+    }
+    if (advance.signal.aborted || found) return;
+    if (!next) {
+      setNowStatus(state.radioStatus, "error");
+      toast(state.radioStatus);
+      return;
+    }
+  }
+  if (next) {
+    state.radioStreak++;
+    startTrack(next, { automatic: true });
+  } else if (ended) setNowStatus("已播完队列" + qualitySuffix(), "ok");
 }
 
 function qualitySuffix() {
@@ -711,18 +1195,29 @@ function qualitySuffix() {
   return " · 直连" + (state.current.level ? " · " + (qualities[state.current.level] || state.current.level) : "");
 }
 
+function syncPrevious() {
+  const cursor = state.queue.findIndex((track) => track.id === state.current?.queueCursor);
+  $("previous").disabled = audio.currentTime < 3 && state.trailIndex < 1 &&
+    (!state.queue.length || cursor <= 0 && state.order !== "repeat-all");
+}
+
 function syncPlayer() {
   const track = state.current?.track;
-  const activeIndex = state.queue.findIndex((item) => item.id === track?.id);
+  const activeIndex = state.queue.findIndex((item) => item.id === state.current?.queueCursor);
   const wrap = state.order === "repeat-all";
   const toggle = $("play-toggle");
   toggle.disabled = (!track && !state.queue.length) || (!!state.playRequest && !audio.getAttribute("src"));
   const playing = !audio.paused;
   setIcon(toggle, playing ? "pause" : "play");
   labelButton(toggle, playing ? "暂停" : "播放");
-  $("previous").disabled = audio.currentTime < 3 && (state.queue.length === 0 || activeIndex <= 0 && !wrap);
-  $("next").disabled = state.queue.length === 0 || (activeIndex === state.queue.length - 1 && !wrap &&
-    (state.order !== "shuffle" || state.queue.length === 1));
+  syncPrevious();
+  $("next").disabled = Boolean(state.advance) || (!state.priority.length && state.trailIndex + 1 >= state.trail.length &&
+    !((track || state.queue.length) && state.radioMode !== "off") &&
+    (state.queue.length === 0 || (activeIndex === state.queue.length - 1 && !wrap &&
+      (state.order !== "shuffle" || state.queue.length === 1))));
+  $("now-panel").querySelector('[data-action="seed-radio"]').disabled = !track;
+  $("now-panel").querySelector('[data-action="save-track"]').disabled = !track;
+  $("now-panel").querySelector('[data-action="hide-recommendation"]').hidden = !state.current?.recommendation;
   const nowLike = $("now-like");
   nowLike.disabled = !track;
   const liked = track ? favorite(track) : false;
@@ -831,8 +1326,7 @@ function syncTimeline() {
   $("seek").value = audio.currentTime || 0;
   $("elapsed").textContent = timeText(audio.currentTime);
   $("duration").textContent = timeText(duration);
-  const activeIndex = state.queue.findIndex((track) => track.id === state.current?.track.id);
-  $("previous").disabled = audio.currentTime < 3 && (state.queue.length === 0 || activeIndex <= 0 && state.order !== "repeat-all");
+  syncPrevious();
   highlightLyrics();
 }
 
@@ -845,6 +1339,122 @@ function saveBlob(blob, filename) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+const backupFormat = "echo-room-library";
+const maxBackupBytes = 3 * 1024 * 1024;
+
+function exportLibrary() {
+  const { favorites, collections, hiddenTracks } = state;
+  const file = new Blob([JSON.stringify({ format: backupFormat, version: 1, favorites, collections, hiddenTracks })],
+    { type: "application/json" });
+  if (file.size > maxBackupBytes) { toast("音乐库超过了单份备份的 3 MB 上限。"); return; }
+  saveBlob(file, "echo-room-library-" + new Date().toISOString().slice(0, 10) + ".json");
+}
+
+function backupTracks(value) {
+  if (!Array.isArray(value)) throw new Error("备份缺少歌曲列表。");
+  return value.map((item) => {
+    const track = songRecord(item);
+    if (!track || typeof item.name !== "string") throw new Error("备份包含无效的歌曲。");
+    const picture = mediaURL(track.pic);
+    return { ...track, name: track.name.slice(0, 300), artists: track.artists.slice(0, 300), album: track.album.slice(0, 300),
+      pic: picture && /\.music\.126\.net$/.test(new URL(picture).hostname) ? picture : "" };
+  });
+}
+
+async function importLibrary(event) {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  if (file.size > maxBackupBytes) { toast("备份文件须小于 3 MB。"); return; }
+  try {
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch { throw new Error("文件不是有效的 JSON 备份。"); }
+    if (data?.format !== backupFormat || data.version !== 1 || !Array.isArray(data.collections)) {
+      throw new Error("请选择由回声导出的音乐库备份。");
+    }
+    const merge = (existing, incoming) => {
+      const known = new Set(existing.map((track) => track.id));
+      return [...existing, ...uniqueTracks(incoming).filter((track) => !known.has(track.id))];
+    };
+    const favorites = merge(state.favorites, backupTracks(data.favorites));
+    const hiddenTracks = merge(state.hiddenTracks, backupTracks(data.hiddenTracks)).slice(0, 200);
+    const collections = state.collections.map((item) => ({ ...item }));
+    for (const item of data.collections) {
+      if (typeof item?.name !== "string" || !item.name.trim() || typeof item.id !== "string" || !/^[a-z0-9-]{1,80}$/.test(item.id)) {
+        throw new Error("备份包含无效的歌单。");
+      }
+      const name = item.name.trim().slice(0, 48);
+      const tracks = backupTracks(item.tracks);
+      let target = collections.find((entry) => entry.id === item.id);
+      if (!target) {
+        target = { id: item.id, name, tracks: [] };
+        collections.push(target);
+      }
+      target.tracks = merge(target.tracks, tracks);
+    }
+    const before = { favorites: state.favorites, hiddenTracks: state.hiddenTracks, collections: state.collections };
+    Object.assign(state, { favorites, hiddenTracks, collections });
+    if (!persist()) {
+      Object.assign(state, before);
+      throw new Error("浏览器空间不足，未能导入备份。");
+    }
+    renderResults();
+    syncPlayer();
+    toast("已合并音乐库备份");
+  } catch (error) {
+    toast(error.message || "读取备份失败。");
+  }
+}
+
+function sleepDescription() {
+  if (state.sleepMode === "end") return "在本轮歌曲播完后暂停，包括单曲循环和心动电台。";
+  if (state.sleepDeadline) return "预计在 " + new Date(state.sleepDeadline).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) + " 暂停播放。";
+  return "到点暂停播放。也可以让正在听的这首完整播完。";
+}
+
+function renderSleep() {
+  const select = $("setting-sleepMode");
+  if (select) {
+    select.value = state.sleepMode;
+    $("setting-sleepMode-note").textContent = sleepDescription();
+  }
+  $("queue-timer").textContent = state.sleepMode === "off" ? "定时停止" : "定时 · " + sleepModes[state.sleepMode];
+}
+
+function stopForSleep() {
+  setSleepMode("off");
+  state.sleepStopped = true;
+  state.advance?.abort();
+  state.advance = null;
+  state.radioStatus = "";
+  state.playRequest?.abort();
+  audio.pause();
+  saveProgress(true);
+  setNowStatus("定时停止已暂停播放" + qualitySuffix(), "ok");
+  updateRadioView();
+  syncPlayer();
+  toast("定时停止已暂停播放");
+}
+
+function setSleepMode(value) {
+  if (!Object.hasOwn(sleepModes, value)) return;
+  clearTimeout(state.sleepTimer);
+  state.sleepMode = value;
+  const delay = Number(value) * 60000;
+  state.sleepDeadline = delay ? Date.now() + delay : 0;
+  state.sleepTimer = delay ? setTimeout(stopForSleep, delay) : null;
+  renderSleep();
+}
+
+function checkSleepDeadline() {
+  if (state.sleepDeadline && Date.now() >= state.sleepDeadline) {
+    stopForSleep();
+    return true;
+  }
+  return false;
 }
 
 function downloadName(headers, track) {
@@ -1037,20 +1647,115 @@ async function copyLink() {
   }
 }
 
+function sharePage() {
+  const view = getView();
+  const id = view.song?.id || view.collectionId;
+  if (!isId(id || "")) return;
+  const url = new URL(location.pathname, location.origin);
+  url.hash = state.mode + "?id=" + id;
+  $("share-url").value = url.href;
+  $("share-note").textContent = "能访问当前站点的人可以打开这个链接。";
+  showDialog("share-dialog");
+  $("share-url").select();
+}
+
+async function copyShare() {
+  const input = $("share-url");
+  try {
+    await navigator.clipboard.writeText(input.value);
+    $("share-note").textContent = "链接已复制。";
+    return;
+  } catch {
+    // Private HTTP addresses and some browsers require the selection-based copy path.
+    input.select();
+    try {
+      if (document.execCommand("copy")) {
+        $("share-note").textContent = "链接已复制。";
+        return;
+      }
+    } catch { /* Leave the address selected for manual copying. */ }
+  }
+  $("share-note").textContent = "链接已选中，可以手动复制。";
+}
+
 const actions = {
   service: () => { showDialog("service-dialog"); loadServiceInfo(); },
   "open-settings": () => { $("service-dialog").close(); displayMode("settings"); $("main").focus(); },
   "refresh-service": () => { checkService(); loadServiceInfo(true); },
   queue: () => { showDialog("queue-dialog"); renderQueue(); },
+  "queue-radio": () => { $("queue-dialog").close(); displayMode("radio"); $("main").focus(); },
+  "queue-timer": () => { $("queue-dialog").close(); displayMode("settings"); $("setting-sleepMode").focus(); },
   close: (_, button) => button.closest("dialog")?.close(),
   play: (track) => togglePlay(track),
   enqueue: (track) => track && enqueue([track]),
+  "play-next": playNext,
   "add-all": () => enqueue(getView().tracks || []),
+  "play-all": () => {
+    const tracks = uniqueTracks(getView().tracks || []);
+    if (!tracks.length) return;
+    state.queue = tracks;
+    state.priority = [];
+    persist();
+    startTrack(tracks[0]);
+  },
+  "save-all": () => editCollection(getView().tracks || []),
+  "export-library": exportLibrary,
+  "import-library": () => $("import-library").click(),
+  "save-queue": () => editCollection(state.queue),
+  "save-track": (track = state.current?.track) => track && editCollection([track]),
+  "new-collection": () => editCollection([], "create"),
+  "rename-collection": () => editCollection([], "rename"),
+  "delete-collection": () => editCollection([], "delete"),
+  "open-collection": (_, control) => {
+    state.collectionId = control.dataset.collection;
+    state.trackFilter = "";
+    renderResults();
+    $("main").focus();
+  },
+  "library-back": () => {
+    state.collectionId = null;
+    state.trackFilter = "";
+    renderResults();
+    $("main").focus();
+  },
+  "collection-remove-track": (track) => {
+    const collection = getView().localCollection;
+    if (!collection || !track) return;
+    collection.tracks = collection.tracks.filter((item) => item.id !== track.id);
+    persist();
+    renderResults();
+    $("result-content").querySelector('[data-action="collection-remove-track"]')?.focus();
+    toast("已从歌单移除");
+  },
+  resume: () => {
+    if (!state.resume) return;
+    const { track, time } = state.resume;
+    startTrack(track, { seek: time });
+  },
+  "seed-radio": seedRadio,
+  "radio-next": () => nextTrack(false, true),
+  "hide-recommendation": () => {
+    const current = state.current;
+    if (!current?.recommendation) return;
+    state.hiddenTracks = [current.track, ...state.hiddenTracks.filter((item) => item.id !== current.track.id)].slice(0, 200);
+    persist();
+    updateRadioView();
+    toast("已设为不再推荐");
+    nextTrack();
+  },
+  "unhide-recommendation": (track) => {
+    if (!track) return;
+    state.hiddenTracks = state.hiddenTracks.filter((item) => item.id !== track.id);
+    persist();
+    renderResults();
+    $("result-content").querySelector(".radio-hidden summary")?.focus();
+    toast("已恢复推荐");
+  },
   favorite: toggleFavorite,
   "now-like": () => toggleFavorite(state.current?.track),
   "toggle-play": () => togglePlay(),
-  next: () => changeTrack(1),
-  previous: () => { if (audio.currentTime >= 3) audio.currentTime = 0; else changeTrack(-1); },
+  next: () => nextTrack(),
+  previous: previousTrack,
   "play-mode": () => {
     const [order, label] = orders[(orders.findIndex(([id]) => id === state.order) + 1) % orders.length];
     state.order = order;
@@ -1067,6 +1772,7 @@ const actions = {
   "queue-remove": (track) => track && changeQueue(track, "queue-remove"),
   "clear-queue": () => {
     state.queue = [];
+    state.priority = [];
     persist();
     renderQueue();
     syncPlayer();
@@ -1075,6 +1781,8 @@ const actions = {
   details: (track) => track && lookup(track.id, "song"),
   download: (track) => track && downloadTrack(track).catch((error) => toast(error.message)),
   "copy-link": copyLink,
+  "share-page": sharePage,
+  "copy-share": copyShare,
   translate: () => {
     state.translated = !state.translated;
     persist();
@@ -1124,10 +1832,7 @@ document.addEventListener("error", (event) => {
   }
 }, true);
 
-window.addEventListener("hashchange", () => {
-  const mode = location.hash.slice(1);
-  if (mode !== "main" && mode !== state.mode) displayMode(mode, false);
-});
+window.addEventListener("hashchange", openLocation);
 $("lookup-form").addEventListener("submit", (event) => { event.preventDefault(); lookup($("query").value); });
 $("query").addEventListener("input", () => { state.queries[state.mode] = $("query").value; });
 $("download-format").value = effectiveDownloadFormat();
@@ -1165,6 +1870,9 @@ const settingsActions = {
   playbackRoute: setPlaybackRoute,
   quality: setQuality,
   order: (value) => { state.order = value; persist(); syncPlayer(); },
+  sleepMode: setSleepMode,
+  radioMode: setRadioMode,
+  discovery: (value) => { state.discovery = value; persist(); },
   translation: (value) => { state.translated = value === "on"; persist(); renderLyrics(); },
 };
 $("result-content").addEventListener("change", (event) => {
@@ -1172,6 +1880,15 @@ $("result-content").addEventListener("change", (event) => {
   if (!update) return;
   update(event.target.value);
   toast("设置已保存");
+});
+
+$("collection-form").addEventListener("submit", saveCollection);
+$("import-library").addEventListener("change", importLibrary);
+$("track-filter").addEventListener("input", (event) => { state.trackFilter = event.target.value; renderResults(); });
+$("collection-target").addEventListener("change", (event) => {
+  const existing = Boolean(event.target.value);
+  $("collection-name-label").hidden = existing;
+  $("collection-name").required = !existing;
 });
 
 $("quality").innerHTML = Object.entries(qualities).map(([value, label]) => '<option value="' + value + '">' + esc(label) + "</option>").join("");
@@ -1185,11 +1902,28 @@ $("seek").addEventListener("input", () => { audio.currentTime = Number($("seek")
 
 audio.addEventListener("volumechange", () => { $("volume").value = audio.volume; persist(); syncPlayer(); });
 audio.addEventListener("playing", () => {
-  if (state.current) recordPlay(state.current.track);
+  if (checkSleepDeadline()) return;
+  state.sleepStopped = false;
+  const current = state.current;
+  if (current) {
+    if (!current.tracked && current.navigation) {
+      const { track, recommendation, queueCursor } = current;
+      state.trail = [...state.trail.slice(0, state.trailIndex + 1), { track, recommendation, queueCursor }].slice(-80);
+      state.trailIndex = state.trail.length - 1;
+    }
+    current.tracked = true;
+    recordPlay(current.track);
+  }
   setNowStatus("正在播放" + qualitySuffix(), "ok");
   syncPlayer();
 });
-audio.addEventListener("pause", () => { if (audio.getAttribute("src")) setNowStatus("已暂停" + qualitySuffix(), "ok"); syncPlayer(); });
+audio.addEventListener("pause", () => {
+  if (audio.getAttribute("src")) {
+    setNowStatus((state.sleepStopped ? "定时停止已暂停播放" : "已暂停") + qualitySuffix(), "ok");
+    saveProgress(true);
+  }
+  syncPlayer();
+});
 audio.addEventListener("error", () => {
   if (audio.getAttribute("src")) {
     if (state.current?.route === "direct") mediaCache.delete(state.current.track.id + ":" + state.current.requested);
@@ -1198,7 +1932,25 @@ audio.addEventListener("error", () => {
   syncPlayer();
 });
 audio.addEventListener("waiting", () => { if (!audio.paused && audio.getAttribute("src")) setNowStatus("正在缓冲…", "loading"); });
-audio.addEventListener("ended", () => changeTrack(1, true));
+audio.addEventListener("ended", () => {
+  saveProgress(true);
+  if (state.sleepMode === "end") { learnFromPlayback(true); stopForSleep(); }
+  else if (!checkSleepDeadline()) nextTrack(true);
+});
+audio.addEventListener("timeupdate", () => {
+  if (checkSleepDeadline()) return;
+  saveProgress();
+  const current = state.current;
+  if (state.radioMode !== "off" && current?.tracked && !current.prefetched && audio.currentTime >= 12) {
+    current.prefetched = true;
+    if (state.order !== "repeat-one" && shouldRecommend(queueNext())) {
+      const [seed] = radioSeeds();
+      if (seed) prefetchSimilar(seed);
+    }
+  }
+});
+window.addEventListener("pagehide", () => saveProgress(true));
+document.addEventListener("visibilitychange", checkSleepDeadline);
 for (const name of ["loadedmetadata", "timeupdate", "emptied", "durationchange"]) audio.addEventListener(name, syncTimeline);
 
 document.addEventListener("keydown", (event) => {
@@ -1214,7 +1966,7 @@ document.addEventListener("keydown", (event) => {
 if ("mediaSession" in navigator) {
   for (const [action, handler] of Object.entries({
     play: () => togglePlay(), pause: () => audio.pause(), previoustrack: () => actions.previous(),
-    nexttrack: () => changeTrack(1), seekto: (details) => {
+    nexttrack: () => nextTrack(), seekto: (details) => {
       if (Number.isFinite(details.seekTime) && Number.isFinite(audio.duration)) audio.currentTime = Math.min(details.seekTime, audio.duration);
     },
   })) {
@@ -1222,7 +1974,7 @@ if ("mediaSession" in navigator) {
   }
 }
 
-displayMode(location.hash.slice(1) || "search", false);
+openLocation();
 renderQueue();
 syncPlayer();
 checkService();
